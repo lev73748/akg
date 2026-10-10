@@ -1,0 +1,31 @@
+[package]
+name = "akg"
+version = "0.5.0"
+edition = "2021"
+description = "Fast package manager for Termux"
+
+[[bin]]
+name = "akg"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures = "0.3"
+sha2 = "0.10"
+md-5 = "0.10"
+xz2 = "0.1"
+flate2 = "1"
+tar = "0.4"
+rayon = "1"
+libc = "0.2"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
