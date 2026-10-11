@@ -1,9 +1,10 @@
 // Установка: каждый пакет скачивается и сразу распаковывается в своей задаче.
 // Локальные .deb ставятся без сети. После установки запускаются триггеры.
+// Кэш .deb переиспользуется только после проверки sha256.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, Permissions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::db::*;
@@ -57,6 +59,36 @@ pub fn run_script(cfg: &Cfg, pkg: &str, arch: &str, path: &Path, name: &str, arg
     } else {
         Err(format!("{name} script of {pkg} failed ({status})"))
     }
+}
+
+// ------------------------------------------------------------ checks
+
+/// Архитектура пакета подходит устройству (или "all"). Пустая — не подходит.
+fn arch_ok(pkg_arch: &str, device: &str) -> bool {
+    pkg_arch == "all" || pkg_arch == device
+}
+
+fn sha256_file(p: &Path) -> io::Result<String> {
+    let mut f = File::open(p)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 128 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex(h.finalize().as_slice()))
+}
+
+/// Файл из кэша годится только если совпали и размер, и sha256 из индекса.
+fn cache_valid(p: &Path, size: u64, want: &str) -> bool {
+    let Ok(md) = fs::metadata(p) else { return false };
+    if !md.is_file() || (size > 0 && md.len() != size) {
+        return false;
+    }
+    sha256_file(p).map_or(false, |h| h == want)
 }
 
 // ------------------------------------------------------------ transaction
@@ -430,17 +462,14 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     let my_arch = arch();
     for p in &locals {
         let pkg = prepare(p)?;
+        if !arch_ok(&pkg.arch, &my_arch) {
+            return Err(format!(
+                "{}: architecture '{}' does not match this device ('{}')",
+                pkg.name, pkg.arch, my_arch
+            ));
+        }
         if !seen.insert(pkg.name.clone()) {
             continue;
-        }
-        if !pkg.arch.is_empty() && pkg.arch != "all" && pkg.arch != my_arch {
-            eprintln!(
-                "{} {}: architecture '{}' does not match this device ('{}')",
-                paint("33", "warning:"),
-                pkg.name,
-                pkg.arch,
-                my_arch
-            );
         }
         local_pkgs.push(pkg);
     }
@@ -541,19 +570,24 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
             let h = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("sem closed");
 
-                let fname = e.filename.rsplit('/').next().unwrap_or(&e.filename).to_string();
+                let fname = e.filename.rsplit('/').next().unwrap_or("").to_string();
+                if fname.is_empty() || fname == "." || fname == ".." {
+                    return Err(format!("{}: bad filename in package index", e.name));
+                }
+                // без хеша в индексе пакет не ставим
+                let Some(want) = e.sha256.clone() else {
+                    return Err(format!("{}: no SHA256 in package index, refusing to install", e.name));
+                };
                 let dst = archives.join(&fname);
 
-                let have = fs::metadata(&dst)
-                    .map(|m| e.size > 0 && m.len() == e.size)
-                    .unwrap_or(false);
-
-                if !have {
+                // кэш годится только при совпадении размера И sha256
+                if !cache_valid(&dst, e.size, &want) {
+                    let _ = fs::remove_file(&dst);
                     let job = Job {
                         url: format!("{}/{}", e.uri.trim_end_matches('/'), e.filename),
                         dest: dst.clone(),
                         size: e.size,
-                        sha256: e.sha256.clone(),
+                        sha256: Some(want.clone()),
                     };
                     for attempt in 0..3u64 {
                         match net::download_one(&job, bytes_counter.clone()).await {
@@ -671,4 +705,36 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     res?;
     println!("{} {} package(s) processed", paint("1;32", "akg:"), recs.len());
     Ok(0)
+}
+
+// ------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arch_rules() {
+        assert!(arch_ok("all", "aarch64"));
+        assert!(arch_ok("aarch64", "aarch64"));
+        assert!(!arch_ok("arm", "aarch64"));
+        assert!(!arch_ok("x86_64", "aarch64"));
+        assert!(!arch_ok("", "aarch64"));
+    }
+
+    #[test]
+    fn cache_needs_matching_size_and_hash() {
+        let p = std::env::temp_dir().join(format!("akg-cache-{}", std::process::id()));
+        fs::write(&p, b"hello").unwrap();
+        let good = hex(Sha256::digest(b"hello").as_slice());
+        assert!(cache_valid(&p, 5, &good));
+        assert!(cache_valid(&p, 0, &good));
+        assert!(!cache_valid(&p, 5, &"0".repeat(64)));
+        assert!(!cache_valid(&p, 6, &good));
+        // подмена содержимого при том же размере
+        fs::write(&p, b"HELLO").unwrap();
+        assert!(!cache_valid(&p, 5, &good));
+        let _ = fs::remove_file(&p);
+        assert!(!cache_valid(&p, 5, &good));
+    }
 }
