@@ -1,4 +1,6 @@
 // Формат .deb: ar, control.tar.*, data.tar.*; распаковка в .dpkg-new + md5 на лету.
+// Безопасность: пути валидируются до записи (без "..", только внутри prefix,
+// реальный путь родителя не должен выходить за prefix через симлинки).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, Permissions};
@@ -73,6 +75,17 @@ pub struct Pkg {
     pub replaces: HashSet<String>,
 }
 
+/// Имя пакета попадает в пути info/<name>.* и tmp.ci/<name>, поэтому строго:
+/// первый символ буква/цифра, дальше буквы, цифры и + - . _
+pub fn valid_pkg_name(n: &str) -> bool {
+    let mut ch = n.chars();
+    match ch.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    n.len() <= 128 && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
+}
+
 pub fn prepare(path: &Path) -> R<Pkg> {
     let members = ar_members(path)?;
     let m = members
@@ -93,6 +106,9 @@ pub fn prepare(path: &Path) -> R<Pkg> {
             .to_string_lossy()
             .trim_start_matches("./")
             .to_string();
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            continue;
+        }
         let mut buf = Vec::new();
         e.read_to_end(&mut buf).map_err(|x| x.to_string())?;
         files.insert(name, buf);
@@ -102,6 +118,9 @@ pub fn prepare(path: &Path) -> R<Pkg> {
         None => return Err(format!("{}: no control file", path.display())),
     };
     let name = ctrl.get("Package").ok_or("control has no Package field")?.to_string();
+    if !valid_pkg_name(&name) {
+        return Err(format!("{}: unsafe package name '{}'", path.display(), name));
+    }
     let version = ctrl.get("Version").unwrap_or("").to_string();
     let arch = ctrl.get("Architecture").unwrap_or("").to_string();
     let mut conffiles = Vec::new();
@@ -158,12 +177,58 @@ pub struct Extracted {
     pub new_paths: Vec<PathBuf>,
 }
 
-fn norm_name(raw: &str) -> String {
-    let t = raw.trim_start_matches("./").trim_start_matches('/').trim_end_matches('/');
-    if t.is_empty() || t == "." {
-        String::new()
+/// Нормализует путь из архива в "/a/b". Любой компонент ".." (или NUL) — ошибка.
+fn norm_name(raw: &str) -> R<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in raw.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => return Err(format!("unsafe path in package (..): {raw}")),
+            c if c.contains('\0') => return Err("unsafe path in package (NUL)".to_string()),
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() {
+        Ok(String::new())
     } else {
-        format!("/{t}")
+        Ok(format!("/{}", parts.join("/")))
+    }
+}
+
+fn under_prefix(cfg: &Cfg, name: &str) -> bool {
+    let pre = cfg.prefix.trim_end_matches('/');
+    name == pre || name.strip_prefix(pre).map_or(false, |r| r.starts_with('/'))
+}
+
+/// Разрешено: prefix и всё внутри него; родительские каталоги prefix — только как каталоги.
+fn allowed(cfg: &Cfg, name: &str, is_dir: bool) -> bool {
+    let pre = cfg.prefix.trim_end_matches('/');
+    under_prefix(cfg, name) || (is_dir && pre.strip_prefix(name).map_or(false, |r| r.starts_with('/')))
+}
+
+fn canon_prefix(cfg: &Cfg) -> R<PathBuf> {
+    let p = cfg.fs(&cfg.prefix);
+    fs::create_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    fs::canonicalize(&p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Ближайший существующий предок пути (с раскрытием симлинков) должен лежать внутри prefix.
+fn check_inside(canon_pre: &Path, dir: &Path) -> R<()> {
+    let mut cur = dir;
+    loop {
+        match fs::canonicalize(cur) {
+            Ok(c) => {
+                return if c.starts_with(canon_pre) {
+                    Ok(())
+                } else {
+                    Err(format!("refusing to write outside the install prefix: {}", dir.display()))
+                };
+            }
+            Err(_) => match cur.parent() {
+                Some(p) => cur = p,
+                None => return Err(format!("cannot resolve path: {}", dir.display())),
+            },
+        }
     }
 }
 
@@ -222,6 +287,7 @@ fn extract_inner(
     owners: &HashMap<String, Vec<String>>,
     ex: &mut Extracted,
 ) -> R<()> {
+    let canon_pre = canon_prefix(cfg)?;
     let members = ar_members(&pkg.path)?;
     let m = members
         .iter()
@@ -236,11 +302,14 @@ fn extract_inner(
     for e in archive.entries().map_err(|x| x.to_string())? {
         let mut e = e.map_err(|x| format!("corrupt data archive: {x}"))?;
         let raw = e.path().map_err(|x| x.to_string())?.to_string_lossy().into_owned();
-        let name = norm_name(&raw);
+        let name = norm_name(&raw)?;
         if name.is_empty() {
             continue;
         }
         let et = e.header().entry_type();
+        if !allowed(cfg, &name, et.is_dir()) {
+            return Err(format!("refusing to write outside the install prefix: {name}"));
+        }
         let mode = e.header().mode().unwrap_or(0o644) & 0o7777;
         let mtime = e.header().mtime().unwrap_or(0);
         let fsp = cfg.fs(&name);
@@ -265,6 +334,9 @@ fn extract_inner(
 
         if et.is_dir() {
             if fs::symlink_metadata(&fsp).is_err() {
+                if under_prefix(cfg, &name) {
+                    check_inside(&canon_pre, &fsp)?;
+                }
                 if let Some(p) = fsp.parent() {
                     fs::create_dir_all(p).map_err(|x| format!("mkdir {}: {x}", p.display()))?;
                 }
@@ -280,6 +352,7 @@ fn extract_inner(
         } else if et.is_file() {
             let parent = fsp.parent().unwrap_or(Path::new("/")).to_path_buf();
             if parent != last_parent {
+                check_inside(&canon_pre, &parent)?;
                 fs::create_dir_all(&parent).map_err(|x| format!("mkdir {}: {x}", parent.display()))?;
                 last_parent = parent;
             }
@@ -313,8 +386,12 @@ fn extract_inner(
                 .map_err(|x| x.to_string())?
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            if link.is_empty() || link.contains('\0') {
+                return Err(format!("bad symlink target for {name}"));
+            }
             if let Some(p) = fsp.parent() {
                 if p != last_parent {
+                    check_inside(&canon_pre, p)?;
                     fs::create_dir_all(p).map_err(|x| format!("mkdir {}: {x}", p.display()))?;
                     last_parent = p.to_path_buf();
                 }
@@ -336,12 +413,19 @@ fn extract_inner(
                 .map_err(|x| x.to_string())?
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let target = norm_name(&link);
+            let target = norm_name(&link)?;
+            if target.is_empty() || !allowed(cfg, &target, false) {
+                return Err(format!("unsafe hard link target for {name}: {link}"));
+            }
             let tfs = cfg.fs(&target);
+            if let Some(tp) = tfs.parent() {
+                check_inside(&canon_pre, tp)?;
+            }
             let tnew = with_suffix(&tfs, ".dpkg-new");
             let src = if tnew.exists() { tnew } else { tfs };
             if let Some(p) = fsp.parent() {
                 if p != last_parent {
+                    check_inside(&canon_pre, p)?;
                     fs::create_dir_all(p).map_err(|x| format!("mkdir {}: {x}", p.display()))?;
                     last_parent = p.to_path_buf();
                 }
@@ -361,4 +445,136 @@ fn extract_inner(
         }
     }
     Ok(())
+}
+
+// ------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PRE: &str = "/data/data/com.termux/files/usr";
+
+    fn tmp(n: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("akg-deb-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn cfg_in(root: &Path) -> Cfg {
+        Cfg {
+            root: root.to_string_lossy().into_owned(),
+            prefix: PRE.to_string(),
+            jobs: 1,
+            yes: true,
+            dry_run: false,
+            force_overwrite: false,
+            no_scripts: true,
+        }
+    }
+
+    // tar-запись с произвольным именем (Builder не даёт писать "..")
+    fn raw_entry(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut h = tar::Header::new_old();
+        let b = name.as_bytes();
+        h.as_old_mut().name[..b.len()].copy_from_slice(b);
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        let mut out = h.as_bytes().to_vec();
+        out.extend_from_slice(data);
+        let pad = (512 - data.len() % 512) % 512;
+        out.extend(std::iter::repeat(0u8).take(pad));
+        out
+    }
+
+    fn make_deb(dir: &Path, entries: &[(&str, &[u8])]) -> PathBuf {
+        let mut tarb: Vec<u8> = Vec::new();
+        for (n, d) in entries {
+            tarb.extend(raw_entry(n, d));
+        }
+        tarb.extend(std::iter::repeat(0u8).take(1024));
+        let mut deb = b"!<arch>\n".to_vec();
+        let hdr = format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", "data.tar", 0, 0, 0, "100644", tarb.len());
+        deb.extend(hdr.as_bytes());
+        deb.extend(&tarb);
+        if tarb.len() % 2 == 1 {
+            deb.push(b'\n');
+        }
+        let p = dir.join("t.deb");
+        fs::write(&p, deb).unwrap();
+        p
+    }
+
+    fn pkg_at(path: PathBuf) -> Pkg {
+        Pkg {
+            name: "t".into(),
+            version: "1".into(),
+            arch: "all".into(),
+            path,
+            ctrl: Control::parse("Package: t\n"),
+            files: HashMap::new(),
+            conffiles: Vec::new(),
+            replaces: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn norm_name_rules() {
+        assert_eq!(norm_name("./a/./b/").unwrap(), "/a/b");
+        assert_eq!(norm_name("./").unwrap(), "");
+        assert!(norm_name("../x").is_err());
+        assert!(norm_name("a/../b").is_err());
+        assert!(norm_name("/data/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn pkg_names() {
+        assert!(valid_pkg_name("libc++"));
+        assert!(valid_pkg_name("python-pip"));
+        assert!(!valid_pkg_name("../../x"));
+        assert!(!valid_pkg_name("a/b"));
+        assert!(!valid_pkg_name(""));
+        assert!(!valid_pkg_name(".hidden"));
+    }
+
+    #[test]
+    fn traversal_entry_rejected() {
+        let root = tmp("trav");
+        let deb = make_deb(&root, &[("./data/data/com.termux/files/usr/../../../../../evil", b"x")]);
+        let r = extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new());
+        assert!(r.is_err());
+        assert!(!root.join("evil").exists());
+    }
+
+    #[test]
+    fn outside_prefix_rejected() {
+        let root = tmp("outside");
+        let deb = make_deb(&root, &[("./etc/passwd", b"x")]);
+        assert!(extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new()).is_err());
+        assert!(!root.join("etc/passwd.dpkg-new").exists());
+    }
+
+    #[test]
+    fn symlinked_parent_escape_rejected() {
+        let root = tmp("symesc");
+        let outside = tmp("symesc-out");
+        let pre = root.join(PRE.trim_start_matches('/'));
+        fs::create_dir_all(&pre).unwrap();
+        std::os::unix::fs::symlink(&outside, pre.join("x")).unwrap();
+        let deb = make_deb(&root, &[("./data/data/com.termux/files/usr/x/pwn", b"x")]);
+        assert!(extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new()).is_err());
+        assert!(!outside.join("pwn.dpkg-new").exists());
+    }
+
+    #[test]
+    fn valid_entry_extracts() {
+        let root = tmp("ok");
+        let deb = make_deb(&root, &[("./data/data/com.termux/files/usr/bin/ok", b"hello")]);
+        let ex = extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new()).unwrap();
+        assert_eq!(ex.entries.len(), 1);
+        assert!(root.join("data/data/com.termux/files/usr/bin/ok.dpkg-new").exists());
+    }
 }
