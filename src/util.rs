@@ -43,7 +43,10 @@ pub fn with_suffix(p: &Path, suf: &str) -> PathBuf {
 pub fn set_mtime(path: &Path, secs: u64) {
     use std::os::unix::ffi::OsStrExt;
     if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
-        let t = libc::timespec { tv_sec: secs as libc::time_t, tv_nsec: 0 };
+        let t = libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: 0,
+        };
         let ts = [t, t];
         unsafe {
             libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), 0);
@@ -87,7 +90,9 @@ pub fn state_dir() -> PathBuf {
 }
 
 pub fn default_jobs() -> usize {
-    let cpus = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     (cpus * 3).clamp(6, 16)
 }
 

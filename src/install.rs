@@ -39,7 +39,14 @@ pub fn confirm(cfg: &Cfg) -> bool {
     !(l == "n" || l == "no")
 }
 
-pub fn run_script(cfg: &Cfg, pkg: &str, arch: &str, path: &Path, name: &str, args: &[&str]) -> R<()> {
+pub fn run_script(
+    cfg: &Cfg,
+    pkg: &str,
+    arch: &str,
+    path: &Path,
+    name: &str,
+    args: &[&str],
+) -> R<()> {
     if !cfg.scripts_enabled() || !path.exists() {
         return Ok(());
     }
@@ -84,7 +91,9 @@ fn sha256_file(p: &Path) -> io::Result<String> {
 
 /// Файл из кэша годится только если совпали и размер, и sha256 из индекса.
 fn cache_valid(p: &Path, size: u64, want: &str) -> bool {
-    let Ok(md) = fs::metadata(p) else { return false };
+    let Ok(md) = fs::metadata(p) else {
+        return false;
+    };
     if !md.is_file() || (size > 0 && md.len() != size) {
         return false;
     }
@@ -150,7 +159,10 @@ fn remove_old_files(
         if l.is_empty() || l == "/." || newset.contains(l) {
             continue;
         }
-        if owners.get(l).map_or(false, |os| os.iter().any(|o| *o != pkg.name)) {
+        if owners
+            .get(l)
+            .map_or(false, |os| os.iter().any(|o| *o != pkg.name))
+        {
             continue;
         }
         if old.conf.contains_key(l) {
@@ -172,8 +184,16 @@ fn remove_old_files(
 fn write_info(cfg: &Cfg, pkg: &Pkg, tmpci: &Path, ex: &Extracted) -> R<()> {
     let info = cfg.info();
     const KNOWN: &[&str] = &[
-        "conffiles", "preinst", "postinst", "prerm", "postrm", "triggers", "shlibs", "symbols",
-        "config", "templates",
+        "conffiles",
+        "preinst",
+        "postinst",
+        "prerm",
+        "postrm",
+        "triggers",
+        "shlibs",
+        "symbols",
+        "config",
+        "templates",
     ];
     for k in KNOWN {
         if !pkg.files.contains_key(*k) {
@@ -224,8 +244,14 @@ fn unpack_inner(
         }
         let p = tmpci.join(n);
         fs::write(&p, data).map_err(|e| format!("{}: {e}", p.display()))?;
-        let script = matches!(n.as_str(), "preinst" | "postinst" | "prerm" | "postrm" | "config");
-        let _ = fs::set_permissions(&p, Permissions::from_mode(if script { 0o755 } else { 0o644 }));
+        let script = matches!(
+            n.as_str(),
+            "preinst" | "postinst" | "prerm" | "postrm" | "config"
+        );
+        let _ = fs::set_permissions(
+            &p,
+            Permissions::from_mode(if script { 0o755 } else { 0o644 }),
+        );
     }
 
     if old.is_some() {
@@ -240,7 +266,14 @@ fn unpack_inner(
     }
     let pre = tmpci.join("preinst");
     match old {
-        Some(o) => run_script(cfg, &pkg.name, &pkg.arch, &pre, "preinst", &["upgrade", &o.version])?,
+        Some(o) => run_script(
+            cfg,
+            &pkg.name,
+            &pkg.arch,
+            &pre,
+            "preinst",
+            &["upgrade", &o.version],
+        )?,
         None => run_script(cfg, &pkg.name, &pkg.arch, &pre, "preinst", &["install"])?,
     }
     *st = St::HalfInstalled;
@@ -269,7 +302,11 @@ fn unpack_inner(
                 } else {
                     let dist = with_suffix(&fsp, ".dpkg-dist");
                     let _ = fs::rename(&newp, &dist);
-                    eprintln!("  conffile {} kept (modified locally), new version: {}", en.name, dist.display());
+                    eprintln!(
+                        "  conffile {} kept (modified locally), new version: {}",
+                        en.name,
+                        dist.display()
+                    );
                 }
             }
             conf_new.push((en.name.clone(), newh));
@@ -320,7 +357,11 @@ fn write_journal(cfg: &Cfg, recs: &[Rec]) -> R<()> {
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut body = String::new();
     for r in recs {
-        body.push_str(&build_stanza(&r.pkg.ctrl, "install reinstreq half-installed", &[]));
+        body.push_str(&build_stanza(
+            &r.pkg.ctrl,
+            "install reinstreq half-installed",
+            &[],
+        ));
         body.push('\n');
     }
     let tmp = dir.join("tmp.i");
@@ -372,7 +413,12 @@ fn run_transaction(
         let name = recs[i].pkg.name.clone();
         let old = db.get(&name).and_then(|s| old_info(s));
         recs[i].old_version = old.as_ref().map(|o| o.version.clone());
-        println!("  {} {} ({})", paint("36", "unpacking"), name, recs[i].pkg.version);
+        println!(
+            "  {} {} ({})",
+            paint("36", "unpacking"),
+            name,
+            recs[i].pkg.version
+        );
 
         let exv = match recs[i].ex.take() {
             Some(x) => x,
@@ -386,7 +432,15 @@ fn run_transaction(
         }
         let r = {
             let rec = &mut recs[i];
-            unpack_inner(cfg, &rec.pkg, &exv, old.as_ref(), owners, &mut rec.st, &mut rec.conf)
+            unpack_inner(
+                cfg,
+                &rec.pkg,
+                &exv,
+                old.as_ref(),
+                owners,
+                &mut rec.st,
+                &mut rec.conf,
+            )
         };
         if let Err(e) = r {
             cleanup_new(&exv);
@@ -414,7 +468,8 @@ fn run_transaction(
     }
     let c = commit(cfg, db, recs);
 
-    if result.is_ok() && c.is_ok() && cfg.scripts_enabled() && !NO_TRIGGERS.load(Ordering::Relaxed) {
+    if result.is_ok() && c.is_ok() && cfg.scripts_enabled() && !NO_TRIGGERS.load(Ordering::Relaxed)
+    {
         let configured: HashSet<String> = recs
             .iter()
             .filter(|r| r.st == St::Installed)
@@ -427,15 +482,23 @@ fn run_transaction(
 
 // ------------------------------------------------------------ deps check for local .deb
 
-fn missing_deps(inst: &HashMap<String, Entry>, planned: &HashSet<String>, ctrl: &Control) -> Vec<String> {
+fn missing_deps(
+    inst: &HashMap<String, Entry>,
+    planned: &HashSet<String>,
+    ctrl: &Control,
+) -> Vec<String> {
     let mut miss = Vec::new();
     for key in ["Pre-Depends", "Depends"] {
         let Some(v) = ctrl.get(key) else { continue };
         for group in parse_dep_list(v) {
             let ok = group.iter().any(|d| {
                 planned.contains(&d.name)
-                    || inst.get(&d.name).map_or(false, |e| resolve::dep_ok(d, &e.version))
-                    || inst.values().any(|e| e.provides.iter().any(|(pn, _)| *pn == d.name))
+                    || inst
+                        .get(&d.name)
+                        .map_or(false, |e| resolve::dep_ok(d, &e.version))
+                    || inst
+                        .values()
+                        .any(|e| e.provides.iter().any(|(pn, _)| *pn == d.name))
             });
             if !ok {
                 miss.push(resolve::fmt_group(&group));
@@ -447,10 +510,18 @@ fn missing_deps(inst: &HashMap<String, Entry>, planned: &HashSet<String>, ctrl: 
 
 // ------------------------------------------------------------ driver
 
-pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgrade_all: bool) -> R<i32> {
+pub fn run_install(
+    cfg: &Cfg,
+    mut reqs: Vec<Request>,
+    locals: Vec<PathBuf>,
+    upgrade_all: bool,
+) -> R<i32> {
     let need_index = upgrade_all || !reqs.is_empty();
-    let idx: Option<Index> =
-        if need_index { Some(Index::load(Path::new(&cfg.prefix), &arch())?) } else { None };
+    let idx: Option<Index> = if need_index {
+        Some(Index::load(Path::new(&cfg.prefix), &arch())?)
+    } else {
+        None
+    };
     let _lock = lock_db(cfg)?;
     let mut db = StatusDb::load(&cfg.admin().join("status"))?;
     incorporate_updates(cfg, &mut db)?;
@@ -475,8 +546,11 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     }
     let local_names: HashSet<String> = local_pkgs.iter().map(|p| p.name.clone()).collect();
 
-    let mut explicit: HashSet<String> =
-        if upgrade_all { HashSet::new() } else { reqs.iter().map(|r| r.name.clone()).collect() };
+    let mut explicit: HashSet<String> = if upgrade_all {
+        HashSet::new()
+    } else {
+        reqs.iter().map(|r| r.name.clone()).collect()
+    };
     explicit.extend(local_names.iter().cloned());
 
     // пакеты из репозитория
@@ -509,16 +583,32 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
 
     println!("{} package(s):", n + local_pkgs.len());
     for e in &entries {
-        let tag = if inst.contains_key(&e.name) { "upgrade" } else { "new" };
+        let tag = if inst.contains_key(&e.name) {
+            "upgrade"
+        } else {
+            "new"
+        };
         println!("  {} {} [{}]", paint("1;32", &e.name), e.vstr, tag);
     }
     for p in &local_pkgs {
-        let tag = if inst.contains_key(&p.name) { "upgrade" } else { "new" };
-        println!("  {} {} [{}, local]", paint("1;32", &p.name), p.version, tag);
+        let tag = if inst.contains_key(&p.name) {
+            "upgrade"
+        } else {
+            "new"
+        };
+        println!(
+            "  {} {} [{}, local]",
+            paint("1;32", &p.name),
+            p.version,
+            tag
+        );
     }
 
-    let planned: HashSet<String> =
-        entries.iter().map(|e| e.name.clone()).chain(local_names.iter().cloned()).collect();
+    let planned: HashSet<String> = entries
+        .iter()
+        .map(|e| e.name.clone())
+        .chain(local_names.iter().cloned())
+        .collect();
     for p in &local_pkgs {
         let miss = missing_deps(&inst, &planned, &p.ctrl);
         if !miss.is_empty() {
@@ -576,7 +666,10 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
                 }
                 // без хеша в индексе пакет не ставим
                 let Some(want) = e.sha256.clone() else {
-                    return Err(format!("{}: no SHA256 in package index, refusing to install", e.name));
+                    return Err(format!(
+                        "{}: no SHA256 in package index, refusing to install",
+                        e.name
+                    ));
                 };
                 let dst = archives.join(&fname);
 
@@ -596,7 +689,10 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
                                 return Err(format!("{}: {err}", e.name));
                             }
                             Err(_) => {
-                                tokio::time::sleep(std::time::Duration::from_millis(300 + attempt * 200)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    300 + attempt * 200,
+                                ))
+                                .await;
                             }
                         }
                     }
@@ -655,7 +751,11 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     }
 
     if dl_only {
-        println!("{} downloaded to {}", paint("1;32", "akg:"), archives.display());
+        println!(
+            "{} downloaded to {}",
+            paint("1;32", "akg:"),
+            archives.display()
+        );
         return Ok(0);
     }
 
@@ -703,7 +803,11 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     warn(marks.save(cfg));
 
     res?;
-    println!("{} {} package(s) processed", paint("1;32", "akg:"), recs.len());
+    println!(
+        "{} {} package(s) processed",
+        paint("1;32", "akg:"),
+        recs.len()
+    );
     Ok(0)
 }
 

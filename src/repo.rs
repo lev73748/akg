@@ -70,7 +70,10 @@ fn parse_dep(s: &str) -> Option<Dep> {
         };
         Some((op, Version::parse(ver.trim())))
     });
-    Some(Dep { name: name.to_string(), rel })
+    Some(Dep {
+        name: name.to_string(),
+        rel,
+    })
 }
 
 pub fn parse_dep_list(s: &str) -> Vec<Vec<Dep>> {
@@ -156,7 +159,11 @@ pub fn parse_entry(st: &str) -> Option<Entry> {
         priority: get("priority").to_string(),
         desc: get("description").lines().next().unwrap_or("").to_string(),
         uri: String::new(),
-        status: get("status").split_whitespace().nth(2).unwrap_or("").to_string(),
+        status: get("status")
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or("")
+            .to_string(),
         vstr,
         name,
     })
@@ -183,8 +190,12 @@ pub fn load_installed(status_path: &Path) -> HashMap<String, Entry> {
         if let Some(e) = parse_entry(st) {
             if matches!(
                 e.status.as_str(),
-                "installed" | "unpacked" | "half-configured" | "half-installed"
-                    | "triggers-pending" | "triggers-awaited"
+                "installed"
+                    | "unpacked"
+                    | "half-configured"
+                    | "half-installed"
+                    | "triggers-pending"
+                    | "triggers-awaited"
             ) {
                 m.insert(e.name.clone(), e);
             }
@@ -247,7 +258,9 @@ pub fn set_custom(repos: &[String], suite: &str, comp: &str) -> R<()> {
             signed_by: None,
         });
     }
-    CUSTOM.set(v).map_err(|_| "repositories already set".to_string())
+    CUSTOM
+        .set(v)
+        .map_err(|_| "repositories already set".to_string())
 }
 
 // ------------------------------------------------------------ index
@@ -306,7 +319,10 @@ impl Index {
         let mut providers: HashMap<String, Vec<(String, Option<Version>)>> = HashMap::new();
         for e in parts.into_iter().flatten() {
             for (pn, pv) in &e.provides {
-                providers.entry(pn.clone()).or_default().push((e.name.clone(), pv.clone()));
+                providers
+                    .entry(pn.clone())
+                    .or_default()
+                    .push((e.name.clone(), pv.clone()));
             }
             by_name.entry(e.name.clone()).or_default().push(e);
         }
@@ -343,10 +359,15 @@ fn parse_deb822(text: &str, out: &mut Vec<Source>) {
                 m.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
             }
         }
-        if !m.get("types").map_or(false, |t| t.split_whitespace().any(|x| x == "deb")) {
+        if !m
+            .get("types")
+            .map_or(false, |t| t.split_whitespace().any(|x| x == "deb"))
+        {
             continue;
         }
-        if m.get("enabled").map_or(false, |e| e.eq_ignore_ascii_case("no")) {
+        if m.get("enabled")
+            .map_or(false, |e| e.eq_ignore_ascii_case("no"))
+        {
             continue;
         }
         let uris = m.get("uris").cloned().unwrap_or_default();
@@ -384,7 +405,10 @@ fn parse_legacy(text: &str, out: &mut Vec<Source>) {
                     break;
                 }
             }
-            for o in opts.trim_matches(|c: char| c == '[' || c == ']' || c == ' ').split(' ') {
+            for o in opts
+                .trim_matches(|c: char| c == '[' || c == ']' || c == ' ')
+                .split(' ')
+            {
                 if let Some(v) = o.strip_prefix("signed-by=") {
                     signed_by = Some(v.to_string());
                 }
@@ -415,7 +439,9 @@ pub fn read_sources(prefix: &Path) -> Vec<Source> {
         files.extend(v);
     }
     for f in files {
-        let Ok(text) = fs::read_to_string(&f) else { continue };
+        let Ok(text) = fs::read_to_string(&f) else {
+            continue;
+        };
         let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext == "sources" {
             parse_deb822(&text, &mut out);
@@ -486,7 +512,9 @@ fn no_gpgv_msg(base: &str) -> String {
 }
 
 fn san(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn strip_clearsign(text: &str) -> String {
@@ -563,7 +591,13 @@ fn verify_inrelease(prefix: &Path, s: &Source, base: &str, data: &[u8]) -> R<Str
     Ok(strip_clearsign(&text))
 }
 
-fn verify_detached(prefix: &Path, s: &Source, base: &str, rel: &[u8], sig: Option<Vec<u8>>) -> R<String> {
+fn verify_detached(
+    prefix: &Path,
+    s: &Source,
+    base: &str,
+    rel: &[u8],
+    sig: Option<Vec<u8>>,
+) -> R<String> {
     let text = String::from_utf8_lossy(rel).into_owned();
     if NO_VERIFY.load(Ordering::Relaxed) {
         no_verify_notice();
@@ -632,9 +666,13 @@ fn parse_release(text: &str) -> HashMap<String, (String, u64)> {
 fn decompress_index(name: &str, data: &[u8]) -> R<Vec<u8>> {
     let mut out = Vec::new();
     if name.ends_with(".xz") {
-        xz2::read::XzDecoder::new(data).read_to_end(&mut out).map_err(|e| format!("xz: {e}"))?;
+        xz2::read::XzDecoder::new(data)
+            .read_to_end(&mut out)
+            .map_err(|e| format!("xz: {e}"))?;
     } else if name.ends_with(".gz") {
-        flate2::read::GzDecoder::new(data).read_to_end(&mut out).map_err(|e| format!("gz: {e}"))?;
+        flate2::read::GzDecoder::new(data)
+            .read_to_end(&mut out)
+            .map_err(|e| format!("gz: {e}"))?;
     } else {
         out.extend_from_slice(data);
     }
@@ -651,10 +689,19 @@ fn update_source(prefix: &Path, s: &Source, arch: &str, dir: &Path) -> R<usize> 
         let stem = format!("{comp}/binary-{arch}/Packages");
         let pick = ["xz", "gz", ""]
             .iter()
-            .map(|e| if e.is_empty() { stem.clone() } else { format!("{stem}.{e}") })
+            .map(|e| {
+                if e.is_empty() {
+                    stem.clone()
+                } else {
+                    format!("{stem}.{e}")
+                }
+            })
             .find(|p| files.contains_key(p));
         let Some(rel) = pick else {
-            eprintln!("{} {base}: no index for {comp}/{arch}", paint("33", "warning:"));
+            eprintln!(
+                "{} {base}: no index for {comp}/{arch}",
+                paint("33", "warning:")
+            );
             continue;
         };
         let (hash, size) = files[&rel].clone();
@@ -672,7 +719,9 @@ fn update_source(prefix: &Path, s: &Source, arch: &str, dir: &Path) -> R<usize> 
         }
         let d = Sha256::digest(&data);
         if hex(d.as_slice()) != hash {
-            return Err(format!("{rel}: sha256 mismatch (does not match signed Release)"));
+            return Err(format!(
+                "{rel}: sha256 mismatch (does not match signed Release)"
+            ));
         }
         let text = decompress_index(&rel, &data)?;
         write_atomic(&list, &text)?;
@@ -690,7 +739,12 @@ pub fn update(prefix: &Path) -> R<()> {
     let arch = arch();
     let dir = lists_dir(prefix);
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    eprintln!("{} {} repositories, arch {}", paint("36", "akg: updating"), srcs.len(), arch);
+    eprintln!(
+        "{} {} repositories, arch {}",
+        paint("36", "akg: updating"),
+        srcs.len(),
+        arch
+    );
 
     let res: Vec<(String, R<usize>)> = srcs
         .par_iter()
@@ -752,7 +806,9 @@ mod tests {
     #[test]
     fn inrelease_without_keys_fails() {
         let p = tmp("nokeys");
-        assert!(verify_inrelease(&p, &src(None), "https://example.org/repo", b"Origin: x\n").is_err());
+        assert!(
+            verify_inrelease(&p, &src(None), "https://example.org/repo", b"Origin: x\n").is_err()
+        );
     }
 
     #[test]

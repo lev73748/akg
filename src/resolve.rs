@@ -25,7 +25,10 @@ pub fn dep_ok(d: &Dep, v: &Version) -> bool {
 }
 
 pub fn fmt_group(g: &[Dep]) -> String {
-    g.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" | ")
+    g.iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn conflict_hit(c: &Dep, p: &Entry) -> bool {
@@ -49,7 +52,9 @@ impl<'a> Res<'a> {
         let mut prov: HashMap<String, Vec<(String, Option<Version>)>> = HashMap::new();
         for p in inst.values() {
             for (pn, pv) in &p.provides {
-                prov.entry(pn.clone()).or_default().push((p.name.clone(), pv.clone()));
+                prov.entry(pn.clone())
+                    .or_default()
+                    .push((p.name.clone(), pv.clone()));
             }
         }
         Res {
@@ -191,12 +196,20 @@ impl<'a> Res<'a> {
             v.retain(|(p, _)| p != &e.name);
         }
         for (pn, pv) in &e.provides {
-            self.prov.entry(pn.clone()).or_default().push((e.name.clone(), pv.clone()));
+            self.prov
+                .entry(pn.clone())
+                .or_default()
+                .push((e.name.clone(), pv.clone()));
         }
         self.chosen.insert(e.name.clone(), e.clone());
         self.check_conflicts(e)?;
 
-        let groups: Vec<Vec<Dep>> = e.pre_depends.iter().chain(e.depends.iter()).cloned().collect();
+        let groups: Vec<Vec<Dep>> = e
+            .pre_depends
+            .iter()
+            .chain(e.depends.iter())
+            .cloned()
+            .collect();
         for g in &groups {
             self.satisfy(g, &e.name)?;
         }
@@ -232,8 +245,15 @@ pub fn plan_install(idx: &Index, inst: &HashMap<String, Entry>, reqs: &[Request]
         }
         r.add(&e)?;
     }
-    let install: Vec<Entry> = r.order.iter().filter_map(|n| r.chosen.get(n).cloned()).collect();
-    Ok(Plan { install, remove: r.remove })
+    let install: Vec<Entry> = r
+        .order
+        .iter()
+        .filter_map(|n| r.chosen.get(n).cloned())
+        .collect();
+    Ok(Plan {
+        install,
+        remove: r.remove,
+    })
 }
 
 pub fn upgrade_requests(idx: &Index, inst: &HashMap<String, Entry>) -> Vec<Request> {
@@ -241,7 +261,11 @@ pub fn upgrade_requests(idx: &Index, inst: &HashMap<String, Entry>) -> Vec<Reque
     for (n, p) in inst {
         if let Some(b) = idx.best(n) {
             if b.version > p.version {
-                v.push(Request { name: n.clone(), version: None, reinstall: false });
+                v.push(Request {
+                    name: n.clone(),
+                    version: None,
+                    reinstall: false,
+                });
             }
         }
     }
@@ -319,7 +343,11 @@ pub fn autoremove_set(inst: &HashMap<String, Entry>, auto: &HashSet<String>) -> 
             }
         }
     }
-    let mut v: Vec<String> = inst.keys().filter(|n| !keep.contains(*n)).cloned().collect();
+    let mut v: Vec<String> = inst
+        .keys()
+        .filter(|n| !keep.contains(*n))
+        .cloned()
+        .collect();
     v.sort();
     v
 }

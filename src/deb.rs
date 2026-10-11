@@ -24,7 +24,8 @@ fn ar_members(path: &Path) -> R<Vec<ArMember>> {
     let mut f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let len = f.metadata().map_err(|e| e.to_string())?.len();
     let mut magic = [0u8; 8];
-    f.read_exact(&mut magic).map_err(|e| format!("{}: {e}", path.display()))?;
+    f.read_exact(&mut magic)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     if &magic != b"!<arch>\n" {
         return Err(format!("{}: not a .deb (ar) archive", path.display()));
     }
@@ -32,11 +33,15 @@ fn ar_members(path: &Path) -> R<Vec<ArMember>> {
     let mut out = Vec::new();
     while pos + 60 <= len {
         let mut h = [0u8; 60];
-        f.read_exact(&mut h).map_err(|e| format!("{}: {e}", path.display()))?;
+        f.read_exact(&mut h)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if &h[58..60] != &b"`\n"[..] {
             return Err(format!("{}: bad ar member header", path.display()));
         }
-        let name = String::from_utf8_lossy(&h[0..16]).trim().trim_end_matches('/').to_string();
+        let name = String::from_utf8_lossy(&h[0..16])
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         let size: u64 = String::from_utf8_lossy(&h[48..58])
             .trim()
             .parse()
@@ -60,7 +65,10 @@ fn open_member(path: &Path, m: &ArMember) -> R<Box<dyn Read>> {
     } else if m.name.ends_with(".tar") {
         Ok(Box::new(r))
     } else {
-        Err(format!("unsupported compression in member '{}' (xz/gz/plain only)", m.name))
+        Err(format!(
+            "unsupported compression in member '{}' (xz/gz/plain only)",
+            m.name
+        ))
     }
 }
 
@@ -83,7 +91,9 @@ pub fn valid_pkg_name(n: &str) -> bool {
         Some(c) if c.is_ascii_alphanumeric() => {}
         _ => return false,
     }
-    n.len() <= 128 && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
+    n.len() <= 128
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
 }
 
 pub fn prepare(path: &Path) -> R<Pkg> {
@@ -117,9 +127,16 @@ pub fn prepare(path: &Path) -> R<Pkg> {
         Some(c) => Control::parse(&String::from_utf8_lossy(c)),
         None => return Err(format!("{}: no control file", path.display())),
     };
-    let name = ctrl.get("Package").ok_or("control has no Package field")?.to_string();
+    let name = ctrl
+        .get("Package")
+        .ok_or("control has no Package field")?
+        .to_string();
     if !valid_pkg_name(&name) {
-        return Err(format!("{}: unsafe package name '{}'", path.display(), name));
+        return Err(format!(
+            "{}: unsafe package name '{}'",
+            path.display(),
+            name
+        ));
     }
     let version = ctrl.get("Version").unwrap_or("").to_string();
     let arch = ctrl.get("Architecture").unwrap_or("").to_string();
@@ -151,7 +168,16 @@ pub fn prepare(path: &Path) -> R<Pkg> {
             }
         }
     }
-    Ok(Pkg { name, version, arch, path: path.to_path_buf(), ctrl, files, conffiles, replaces })
+    Ok(Pkg {
+        name,
+        version,
+        arch,
+        path: path.to_path_buf(),
+        ctrl,
+        files,
+        conffiles,
+        replaces,
+    })
 }
 
 // ------------------------------------------------------------ data
@@ -203,7 +229,8 @@ fn under_prefix(cfg: &Cfg, name: &str) -> bool {
 /// Разрешено: prefix и всё внутри него; родительские каталоги prefix — только как каталоги.
 fn allowed(cfg: &Cfg, name: &str, is_dir: bool) -> bool {
     let pre = cfg.prefix.trim_end_matches('/');
-    under_prefix(cfg, name) || (is_dir && pre.strip_prefix(name).map_or(false, |r| r.starts_with('/')))
+    under_prefix(cfg, name)
+        || (is_dir && pre.strip_prefix(name).map_or(false, |r| r.starts_with('/')))
 }
 
 fn canon_prefix(cfg: &Cfg) -> R<PathBuf> {
@@ -221,7 +248,10 @@ fn check_inside(canon_pre: &Path, dir: &Path) -> R<()> {
                 return if c.starts_with(canon_pre) {
                     Ok(())
                 } else {
-                    Err(format!("refusing to write outside the install prefix: {}", dir.display()))
+                    Err(format!(
+                        "refusing to write outside the install prefix: {}",
+                        dir.display()
+                    ))
                 };
             }
             Err(_) => match cur.parent() {
@@ -271,7 +301,11 @@ pub fn load_owners(cfg: &Cfg) -> HashMap<String, Vec<String>> {
 }
 
 pub fn extract_data(cfg: &Cfg, pkg: &Pkg, owners: &HashMap<String, Vec<String>>) -> R<Extracted> {
-    let mut ex = Extracted { entries: Vec::new(), steals: Vec::new(), new_paths: Vec::new() };
+    let mut ex = Extracted {
+        entries: Vec::new(),
+        steals: Vec::new(),
+        new_paths: Vec::new(),
+    };
     match extract_inner(cfg, pkg, owners, &mut ex) {
         Ok(()) => Ok(ex),
         Err(e) => {
@@ -301,14 +335,20 @@ fn extract_inner(
 
     for e in archive.entries().map_err(|x| x.to_string())? {
         let mut e = e.map_err(|x| format!("corrupt data archive: {x}"))?;
-        let raw = e.path().map_err(|x| x.to_string())?.to_string_lossy().into_owned();
+        let raw = e
+            .path()
+            .map_err(|x| x.to_string())?
+            .to_string_lossy()
+            .into_owned();
         let name = norm_name(&raw)?;
         if name.is_empty() {
             continue;
         }
         let et = e.header().entry_type();
         if !allowed(cfg, &name, et.is_dir()) {
-            return Err(format!("refusing to write outside the install prefix: {name}"));
+            return Err(format!(
+                "refusing to write outside the install prefix: {name}"
+            ));
         }
         let mode = e.header().mode().unwrap_or(0o644) & 0o7777;
         let mtime = e.header().mtime().unwrap_or(0);
@@ -342,18 +382,27 @@ fn extract_inner(
                 }
                 match fs::create_dir(&fsp) {
                     Ok(()) => {
-                        let _ = fs::set_permissions(&fsp, Permissions::from_mode((mode | 0o700) & 0o7777));
+                        let _ = fs::set_permissions(
+                            &fsp,
+                            Permissions::from_mode((mode | 0o700) & 0o7777),
+                        );
                     }
                     Err(x) if x.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(x) => return Err(format!("mkdir {}: {x}", fsp.display())),
                 }
             }
-            ex.entries.push(FileEnt { name, kind: Kind::Dir, md5: None, pending: false });
+            ex.entries.push(FileEnt {
+                name,
+                kind: Kind::Dir,
+                md5: None,
+                pending: false,
+            });
         } else if et.is_file() {
             let parent = fsp.parent().unwrap_or(Path::new("/")).to_path_buf();
             if parent != last_parent {
                 check_inside(&canon_pre, &parent)?;
-                fs::create_dir_all(&parent).map_err(|x| format!("mkdir {}: {x}", parent.display()))?;
+                fs::create_dir_all(&parent)
+                    .map_err(|x| format!("mkdir {}: {x}", parent.display()))?;
                 last_parent = parent;
             }
             let newp = with_suffix(&fsp, ".dpkg-new");
@@ -372,14 +421,20 @@ fn extract_inner(
                     break;
                 }
                 h.update(&buf[..n]);
-                out.write_all(&buf[..n]).map_err(|x| format!("write {}: {x}", newp.display()))?;
+                out.write_all(&buf[..n])
+                    .map_err(|x| format!("write {}: {x}", newp.display()))?;
             }
             let _ = out.set_permissions(Permissions::from_mode((mode | 0o400) & 0o7777));
             drop(out);
             set_mtime(&newp, mtime);
             let digest = hex(h.finalize().as_slice());
             md5s.insert(name.clone(), digest.clone());
-            ex.entries.push(FileEnt { name, kind: Kind::File, md5: Some(digest), pending: true });
+            ex.entries.push(FileEnt {
+                name,
+                kind: Kind::File,
+                md5: Some(digest),
+                pending: true,
+            });
         } else if et.is_symlink() {
             let link = e
                 .link_name()
@@ -398,7 +453,12 @@ fn extract_inner(
             }
             if let Ok(md) = fs::symlink_metadata(&fsp) {
                 if md.is_dir() {
-                    ex.entries.push(FileEnt { name, kind: Kind::Sym, md5: None, pending: false });
+                    ex.entries.push(FileEnt {
+                        name,
+                        kind: Kind::Sym,
+                        md5: None,
+                        pending: false,
+                    });
                     continue;
                 }
             }
@@ -406,7 +466,12 @@ fn extract_inner(
             let _ = fs::remove_file(&newp);
             symlink(&link, &newp).map_err(|x| format!("symlink {}: {x}", newp.display()))?;
             ex.new_paths.push(newp);
-            ex.entries.push(FileEnt { name, kind: Kind::Sym, md5: None, pending: true });
+            ex.entries.push(FileEnt {
+                name,
+                kind: Kind::Sym,
+                md5: None,
+                pending: true,
+            });
         } else if et.is_hard_link() {
             let link = e
                 .link_name()
@@ -439,7 +504,12 @@ fn extract_inner(
             if let Some(d) = &digest {
                 md5s.insert(name.clone(), d.clone());
             }
-            ex.entries.push(FileEnt { name, kind: Kind::Hard, md5: digest, pending: true });
+            ex.entries.push(FileEnt {
+                name,
+                kind: Kind::Hard,
+                md5: digest,
+                pending: true,
+            });
         } else {
             eprintln!("{} skipping special file {}", paint("33", "warning:"), name);
         }
@@ -497,7 +567,15 @@ mod tests {
         }
         tarb.extend(std::iter::repeat(0u8).take(1024));
         let mut deb = b"!<arch>\n".to_vec();
-        let hdr = format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", "data.tar", 0, 0, 0, "100644", tarb.len());
+        let hdr = format!(
+            "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+            "data.tar",
+            0,
+            0,
+            0,
+            "100644",
+            tarb.len()
+        );
         deb.extend(hdr.as_bytes());
         deb.extend(&tarb);
         if tarb.len() % 2 == 1 {
@@ -543,7 +621,10 @@ mod tests {
     #[test]
     fn traversal_entry_rejected() {
         let root = tmp("trav");
-        let deb = make_deb(&root, &[("./data/data/com.termux/files/usr/../../../../../evil", b"x")]);
+        let deb = make_deb(
+            &root,
+            &[("./data/data/com.termux/files/usr/../../../../../evil", b"x")],
+        );
         let r = extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new());
         assert!(r.is_err());
         assert!(!root.join("evil").exists());
@@ -572,9 +653,14 @@ mod tests {
     #[test]
     fn valid_entry_extracts() {
         let root = tmp("ok");
-        let deb = make_deb(&root, &[("./data/data/com.termux/files/usr/bin/ok", b"hello")]);
+        let deb = make_deb(
+            &root,
+            &[("./data/data/com.termux/files/usr/bin/ok", b"hello")],
+        );
         let ex = extract_data(&cfg_in(&root), &pkg_at(deb), &HashMap::new()).unwrap();
         assert_eq!(ex.entries.len(), 1);
-        assert!(root.join("data/data/com.termux/files/usr/bin/ok.dpkg-new").exists());
+        assert!(root
+            .join("data/data/com.termux/files/usr/bin/ok.dpkg-new")
+            .exists());
     }
 }

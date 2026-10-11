@@ -23,7 +23,11 @@ impl Version {
             Some((u, r)) => (u, r),
             None => (rest, ""),
         };
-        Version { epoch, upstream: up.to_string(), revision: rev.to_string() }
+        Version {
+            epoch,
+            upstream: up.to_string(),
+            revision: rev.to_string(),
+        }
     }
 }
 

@@ -84,7 +84,12 @@ pub async fn download_one(job: &Job, bytes: Arc<AtomicU64>) -> Result<(), String
 
 /// Скачать один файл по ссылке (для прямых ссылок на .deb), без проверки хеша.
 pub fn download_file(url: &str, dest: &Path) -> R<()> {
-    let job = Job { url: url.to_string(), dest: dest.to_path_buf(), size: 0, sha256: None };
+    let job = Job {
+        url: url.to_string(),
+        dest: dest.to_path_buf(),
+        size: 0,
+        sha256: None,
+    };
     let bytes = AtomicU64::new(0);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

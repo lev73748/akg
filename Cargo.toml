@@ -1,8 +1,14 @@
+
 [package]
 name = "akg"
 version = "0.5.1"
 edition = "2021"
 description = "Fast package manager for Termux"
+license = "MIT"
+repository = "https://github.com/lev73748/akg"
+readme = "README.md"
+keywords = ["termux", "package-manager", "apt", "cli"]
+categories = ["command-line-utilities", "package-management"]
 
 [[bin]]
 name = "akg"
@@ -21,7 +27,6 @@ rayon = "1"
 libc = "0.2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
-
 
 [profile.release]
 opt-level = 3

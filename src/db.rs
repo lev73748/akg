@@ -65,7 +65,10 @@ pub fn lock_db(cfg: &Cfg) -> R<Lock> {
         fl.l_len = 0;
         let rc = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_SETLK, &fl as *const libc::flock) };
         if rc != 0 {
-            return Err(format!("cannot lock {} (is apt/dpkg/akg already running?)", p.display()));
+            return Err(format!(
+                "cannot lock {} (is apt/dpkg/akg already running?)",
+                p.display()
+            ));
         }
         fds.push(f);
     }
@@ -106,14 +109,35 @@ impl Control {
     }
 
     pub fn get(&self, k: &str) -> Option<&str> {
-        self.fields.iter().find(|(a, _)| a.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str())
+        self.fields
+            .iter()
+            .find(|(a, _)| a.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.as_str())
     }
 }
 
 const FIELD_ORDER: &[&str] = &[
-    "Package", "Essential", "Status", "Priority", "Section", "Installed-Size", "Origin",
-    "Maintainer", "Bugs", "Architecture", "Multi-Arch", "Source", "Version", "Replaces",
-    "Provides", "Depends", "Pre-Depends", "Recommends", "Suggests", "Breaks", "Conflicts",
+    "Package",
+    "Essential",
+    "Status",
+    "Priority",
+    "Section",
+    "Installed-Size",
+    "Origin",
+    "Maintainer",
+    "Bugs",
+    "Architecture",
+    "Multi-Arch",
+    "Source",
+    "Version",
+    "Replaces",
+    "Provides",
+    "Depends",
+    "Pre-Depends",
+    "Recommends",
+    "Suggests",
+    "Breaks",
+    "Conflicts",
     "Enhances",
 ];
 
@@ -230,7 +254,10 @@ impl StatusDb {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
-        let mut db = StatusDb { order: Vec::new(), map: HashMap::new() };
+        let mut db = StatusDb {
+            order: Vec::new(),
+            map: HashMap::new(),
+        };
         db.add_text(&String::from_utf8_lossy(&bytes));
         Ok(db)
     }
@@ -292,8 +319,12 @@ impl StatusDb {
             if let Some(e) = parse_entry(st) {
                 if matches!(
                     e.status.as_str(),
-                    "installed" | "unpacked" | "half-configured" | "half-installed"
-                        | "triggers-pending" | "triggers-awaited"
+                    "installed"
+                        | "unpacked"
+                        | "half-configured"
+                        | "half-installed"
+                        | "triggers-pending"
+                        | "triggers-awaited"
                 ) {
                     m.insert(n.clone(), e);
                 }
@@ -338,7 +369,10 @@ pub fn incorporate_updates(cfg: &Cfg, db: &mut StatusDb) -> R<()> {
     if names.is_empty() {
         return Ok(());
     }
-    eprintln!("{}", paint("33", "akg: incorporating leftover updates journal..."));
+    eprintln!(
+        "{}",
+        paint("33", "akg: incorporating leftover updates journal...")
+    );
     let dir = cfg.admin().join("updates");
     for n in &names {
         let b = fs::read(dir.join(n)).map_err(|e| format!("{n}: {e}"))?;
@@ -389,7 +423,11 @@ impl Marks {
     }
 
     pub fn autos(&self) -> HashSet<String> {
-        self.map.iter().filter(|(_, v)| v.1).map(|(n, _)| n.clone()).collect()
+        self.map
+            .iter()
+            .filter(|(_, v)| v.1)
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 
     pub fn save(&self, cfg: &Cfg) -> R<()> {

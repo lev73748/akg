@@ -85,7 +85,11 @@ fn main() {
 fn deb_ref_to_path(cfg: &Cfg, s: &str) -> R<PathBuf> {
     if s.starts_with("http://") || s.starts_with("https://") {
         let clean = s.split(|c: char| c == '?' || c == '#').next().unwrap_or(s);
-        let name = clean.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("package.deb");
+        let name = clean
+            .rsplit('/')
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or("package.deb");
         let dir = cfg.archives();
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let dst = dir.join(name);
@@ -103,7 +107,10 @@ fn deb_ref_to_path(cfg: &Cfg, s: &str) -> R<PathBuf> {
 
 fn run() -> R<i32> {
     let mut cfg = Cfg {
-        root: std::env::var("AKG_ROOT").unwrap_or_default().trim_end_matches('/').to_string(),
+        root: std::env::var("AKG_ROOT")
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string(),
         prefix: std::env::var("PREFIX").unwrap_or_else(|_| DEFAULT_PREFIX.into()),
         jobs: default_jobs(),
         yes: false,
@@ -234,7 +241,11 @@ fn run() -> R<i32> {
                         version: Some(v.to_string()),
                         reinstall: re,
                     },
-                    None => resolve::Request { name: a.clone(), version: None, reinstall: re },
+                    None => resolve::Request {
+                        name: a.clone(),
+                        version: None,
+                        reinstall: re,
+                    },
                 })
                 .collect();
             install::run_install(&cfg, reqs, locals, false)
@@ -293,7 +304,12 @@ fn run() -> R<i32> {
             }
             hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
             for (_, e) in &hits {
-                println!("{}/stable {}\n  {}\n", paint("1;32", &e.name), e.vstr, e.desc);
+                println!(
+                    "{}/stable {}\n  {}\n",
+                    paint("1;32", &e.name),
+                    e.vstr,
+                    e.desc
+                );
             }
             Ok(if hits.is_empty() { 1 } else { 0 })
         }
@@ -353,7 +369,11 @@ fn run() -> R<i32> {
             let marks = db::Marks::load(&cfg).autos();
             for n in names {
                 let e = &inst[n];
-                let tag = if marks.contains(n) { "[installed,automatic]" } else { "[installed]" };
+                let tag = if marks.contains(n) {
+                    "[installed,automatic]"
+                } else {
+                    "[installed]"
+                };
                 println!("{}/now {} {} {}", paint("1;32", n), e.vstr, e.arch, tag);
             }
             Ok(0)

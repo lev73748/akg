@@ -11,15 +11,33 @@ use crate::install::{confirm, run_script};
 use crate::resolve;
 use crate::util::*;
 
-const BACKUP_EXTS: &[&str] =
-    &["~", ".bak", "%", ".dpkg-tmp", ".dpkg-new", ".dpkg-old", ".dpkg-dist", ".dpkg-bak"];
+const BACKUP_EXTS: &[&str] = &[
+    "~",
+    ".bak",
+    "%",
+    ".dpkg-tmp",
+    ".dpkg-new",
+    ".dpkg-old",
+    ".dpkg-dist",
+    ".dpkg-bak",
+];
 
 fn is_numbered(suf: &str) -> bool {
-    suf.len() > 2 && suf.starts_with('~') && suf.ends_with('~') && suf[1..suf.len() - 1].bytes().all(|b| b.is_ascii_digit())
+    suf.len() > 2
+        && suf.starts_with('~')
+        && suf.ends_with('~')
+        && suf[1..suf.len() - 1].bytes().all(|b| b.is_ascii_digit())
 }
 
-fn used_by_others(owners: &HashMap<String, Vec<String>>, path: &str, me: &str, removed: &HashSet<String>) -> bool {
-    owners.get(path).map_or(false, |v| v.iter().any(|o| o != me && !removed.contains(o)))
+fn used_by_others(
+    owners: &HashMap<String, Vec<String>>,
+    path: &str,
+    me: &str,
+    removed: &HashSet<String>,
+) -> bool {
+    owners
+        .get(path)
+        .map_or(false, |v| v.iter().any(|o| o != me && !removed.contains(o)))
 }
 
 fn purge_one(
@@ -38,8 +56,9 @@ fn purge_one(
             if let Ok(rd) = fs::read_dir(dir) {
                 for e in rd.flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    let suffix_backup =
-                        n.strip_prefix(base).map_or(false, |suf| BACKUP_EXTS.contains(&suf) || is_numbered(suf));
+                    let suffix_backup = n
+                        .strip_prefix(base)
+                        .map_or(false, |suf| BACKUP_EXTS.contains(&suf) || is_numbered(suf));
                     let hash_backup = n.len() >= 2
                         && n.starts_with('#')
                         && n.ends_with('#')
@@ -51,7 +70,14 @@ fn purge_one(
             }
         }
     }
-    run_script(cfg, name, arch, &cfg.info().join(format!("{name}.postrm")), "postrm", &["purge"])?;
+    run_script(
+        cfg,
+        name,
+        arch,
+        &cfg.info().join(format!("{name}.postrm")),
+        "postrm",
+        &["purge"],
+    )?;
 
     let lp = cfg.info().join(format!("{name}.list"));
     if let Ok(b) = fs::read(&lp) {
@@ -91,13 +117,25 @@ fn remove_one(
     let status_path = cfg.admin().join("status");
     println!("  {} {}", paint("36", "removing"), name);
 
-    run_script(cfg, name, arch, &info.join(format!("{name}.prerm")), "prerm", &["remove"])?;
-    db.set(name, set_status(stanza, "deinstall reinstreq half-installed"));
+    run_script(
+        cfg,
+        name,
+        arch,
+        &info.join(format!("{name}.prerm")),
+        "prerm",
+        &["remove"],
+    )?;
+    db.set(
+        name,
+        set_status(stanza, "deinstall reinstreq half-installed"),
+    );
     db.save(&status_path)?;
 
     let conf: HashSet<String> = conffiles_of(stanza).into_iter().map(|(n, _)| n).collect();
     let lp = info.join(format!("{name}.list"));
-    let text = fs::read(&lp).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let text = fs::read(&lp)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
     let lines: Vec<&str> = text.lines().collect();
     let mut leftover: Vec<&str> = Vec::new();
 
@@ -125,7 +163,11 @@ fn remove_one(
             let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-tmp"));
             let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-new"));
             if let Err(e) = fs::remove_file(&fsp) {
-                eprintln!("{} cannot remove {}: {e}", paint("33", "warning:"), fsp.display());
+                eprintln!(
+                    "{} cannot remove {}: {e}",
+                    paint("33", "warning:"),
+                    fsp.display()
+                );
             }
         }
     }
@@ -136,7 +178,14 @@ fn remove_one(
     }
     write_atomic(&lp, s.as_bytes())?;
 
-    run_script(cfg, name, arch, &info.join(format!("{name}.postrm")), "postrm", &["remove"])?;
+    run_script(
+        cfg,
+        name,
+        arch,
+        &info.join(format!("{name}.postrm")),
+        "postrm",
+        &["remove"],
+    )?;
 
     let has_postrm = info.join(format!("{name}.postrm")).exists();
     let pre = format!("{name}.");
@@ -182,11 +231,17 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
         return Ok(1);
     }
 
-    let mut set: Vec<String> =
-        if targets.is_empty() { Vec::new() } else { resolve::removal_closure(&inst, &targets) };
+    let mut set: Vec<String> = if targets.is_empty() {
+        Vec::new()
+    } else {
+        resolve::removal_closure(&inst, &targets)
+    };
     if autorem {
-        let rest: HashMap<String, _> =
-            inst.iter().filter(|(n, _)| !set.contains(n)).map(|(n, e)| (n.clone(), e.clone())).collect();
+        let rest: HashMap<String, _> = inst
+            .iter()
+            .filter(|(n, _)| !set.contains(n))
+            .map(|(n, e)| (n.clone(), e.clone()))
+            .collect();
         let extra = resolve::autoremove_set(&rest, &marks.autos());
         set.extend(extra);
         set.sort();
@@ -194,7 +249,9 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     }
     for n in &set {
         if inst.get(n).map_or(false, |e| e.essential) {
-            return Err(format!("{n} is an essential package, refusing to remove it"));
+            return Err(format!(
+                "{n} is an essential package, refusing to remove it"
+            ));
         }
     }
     if set.is_empty() && cfg_only.is_empty() {
@@ -204,7 +261,11 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
 
     println!("To {}:", if purge { "purge" } else { "remove" });
     for n in set.iter().chain(cfg_only.iter()) {
-        let why = if targets.contains(n) || cfg_only.contains(n) { "" } else { "  (unused dependency/dependent)" };
+        let why = if targets.contains(n) || cfg_only.contains(n) {
+            ""
+        } else {
+            "  (unused dependency/dependent)"
+        };
         println!("  {}{}", paint("1;31", n), why);
     }
     if cfg.dry_run {
@@ -259,6 +320,10 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
         let _ = Path::new(p);
     }
     result?;
-    println!("{} {} package(s) processed", paint("1;32", "akg:"), removed.len());
+    println!(
+        "{} {} package(s) processed",
+        paint("1;32", "akg:"),
+        removed.len()
+    );
     Ok(0)
 }
