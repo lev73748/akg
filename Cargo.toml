@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/lev73748/akg"
 readme = "README.md"
 keywords = ["termux", "package-manager", "apt", "cli"]
-categories = ["command-line-utilities", "package-management"]
+categories = ["command-line-utilities", "os::android-apis"]
 
 [[bin]]
 name = "akg"
