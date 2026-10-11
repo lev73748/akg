@@ -1,6 +1,7 @@
 // Репозитории: sources (deb822 + legacy), InRelease + проверка подписи через gpgv,
 // проверка sha256-цепочки Release -> Packages -> .deb, разбор индекса, Index.
 // Свой репозиторий через --repo (set_custom), отдельный каталог индексов.
+// Подпись обязательна: нет gpgv / ключей / подписи — ошибка (кроме явного --no-verify).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -204,9 +205,19 @@ pub struct Source {
 
 static CUSTOM: OnceLock<Vec<Source>> = OnceLock::new();
 static NO_VERIFY: AtomicBool = AtomicBool::new(false);
+static NV_NOTICE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_no_verify(v: bool) {
     NO_VERIFY.store(v, Ordering::Relaxed);
+}
+
+fn no_verify_notice() {
+    if !NV_NOTICE.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "{} repository signature verification is DISABLED (--no-verify): package indexes are NOT authenticated",
+            paint("1;31", "WARNING:")
+        );
+    }
 }
 
 pub fn is_custom() -> bool {
@@ -417,14 +428,6 @@ pub fn read_sources(prefix: &Path) -> Vec<Source> {
 
 // ------------------------------------------------------------ signatures
 
-static WARNED: AtomicBool = AtomicBool::new(false);
-
-fn warn_once(msg: &str) {
-    if !WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!("{} {}", paint("33", "warning:"), msg);
-    }
-}
-
 fn gpgv_ok() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
     *OK.get_or_init(|| {
@@ -436,32 +439,50 @@ fn gpgv_ok() -> bool {
     })
 }
 
+/// Ключи для проверки. Если signed-by задан — ТОЛЬКО они (любой отсутствующий файл = пусто,
+/// без отката на общие ключи). Если не задан — trusted.gpg.d и trusted.gpg.
 fn keyrings(prefix: &Path, signed_by: &Option<String>) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(s) = signed_by {
         for p in s.split_whitespace() {
             let pb = PathBuf::from(p);
-            if pb.is_file() {
-                v.push(pb);
+            if !pb.is_file() {
+                return Vec::new();
+            }
+            v.push(pb);
+        }
+        v.sort();
+        return v;
+    }
+    if let Ok(rd) = fs::read_dir(prefix.join("etc/apt/trusted.gpg.d")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |x| x == "gpg") {
+                v.push(p);
             }
         }
     }
-    if v.is_empty() {
-        if let Ok(rd) = fs::read_dir(prefix.join("etc/apt/trusted.gpg.d")) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().map_or(false, |x| x == "gpg") {
-                    v.push(p);
-                }
-            }
-        }
-        let t = prefix.join("etc/apt/trusted.gpg");
-        if t.is_file() {
-            v.push(t);
-        }
+    let t = prefix.join("etc/apt/trusted.gpg");
+    if t.is_file() {
+        v.push(t);
     }
     v.sort();
     v
+}
+
+fn no_keys_msg(base: &str, s: &Source) -> String {
+    match &s.signed_by {
+        Some(sb) => format!(
+            "{base}: key file(s) from signed-by not found ({sb}); refusing to accept an unverified repository (or use --no-verify)"
+        ),
+        None => format!(
+            "{base}: no trusted keys found in etc/apt/trusted.gpg.d (pkg install termux-keyring); refusing to accept an unverified repository (or use --no-verify)"
+        ),
+    }
+}
+
+fn no_gpgv_msg(base: &str) -> String {
+    format!("{base}: gpgv not found, cannot verify the signature (pkg install gpgv, or use --no-verify)")
 }
 
 fn san(s: &str) -> String {
@@ -522,12 +543,15 @@ fn run_gpgv(kr: &[PathBuf], files: &[&Path], base: &str) -> R<()> {
 fn verify_inrelease(prefix: &Path, s: &Source, base: &str, data: &[u8]) -> R<String> {
     let text = String::from_utf8_lossy(data).into_owned();
     if NO_VERIFY.load(Ordering::Relaxed) {
+        no_verify_notice();
         return Ok(strip_clearsign(&text));
     }
     let kr = keyrings(prefix, &s.signed_by);
-    if !gpgv_ok() || kr.is_empty() {
-        warn_once("gpgv or keyrings not found: repository signatures are NOT verified (pkg install gpgv)");
-        return Ok(strip_clearsign(&text));
+    if kr.is_empty() {
+        return Err(no_keys_msg(base, s));
+    }
+    if !gpgv_ok() {
+        return Err(no_gpgv_msg(base));
     }
     let dir = state_dir();
     let _ = fs::create_dir_all(&dir);
@@ -542,24 +566,31 @@ fn verify_inrelease(prefix: &Path, s: &Source, base: &str, data: &[u8]) -> R<Str
 fn verify_detached(prefix: &Path, s: &Source, base: &str, rel: &[u8], sig: Option<Vec<u8>>) -> R<String> {
     let text = String::from_utf8_lossy(rel).into_owned();
     if NO_VERIFY.load(Ordering::Relaxed) {
+        no_verify_notice();
         return Ok(text);
     }
     let kr = keyrings(prefix, &s.signed_by);
-    match sig {
-        Some(sig) if gpgv_ok() && !kr.is_empty() => {
-            let dir = state_dir();
-            let _ = fs::create_dir_all(&dir);
-            let tr = dir.join(format!("Release.{}", san(base)));
-            let ts = dir.join(format!("Release.gpg.{}", san(base)));
-            fs::write(&tr, rel).map_err(|e| e.to_string())?;
-            fs::write(&ts, &sig).map_err(|e| e.to_string())?;
-            let r = run_gpgv(&kr, &[ts.as_path(), tr.as_path()], base);
-            let _ = fs::remove_file(&tr);
-            let _ = fs::remove_file(&ts);
-            r?;
-        }
-        _ => warn_once("gpgv, keyrings or signature missing: repository signatures are NOT verified"),
+    if kr.is_empty() {
+        return Err(no_keys_msg(base, s));
     }
+    let Some(sig) = sig else {
+        return Err(format!(
+            "{base}: no signature (InRelease/Release.gpg) available, refusing unsigned repository (or use --no-verify)"
+        ));
+    };
+    if !gpgv_ok() {
+        return Err(no_gpgv_msg(base));
+    }
+    let dir = state_dir();
+    let _ = fs::create_dir_all(&dir);
+    let tr = dir.join(format!("Release.{}", san(base)));
+    let ts = dir.join(format!("Release.gpg.{}", san(base)));
+    fs::write(&tr, rel).map_err(|e| e.to_string())?;
+    fs::write(&ts, &sig).map_err(|e| e.to_string())?;
+    let r = run_gpgv(&kr, &[ts.as_path(), tr.as_path()], base);
+    let _ = fs::remove_file(&tr);
+    let _ = fs::remove_file(&ts);
+    r?;
     Ok(text)
 }
 
@@ -679,5 +710,64 @@ pub fn update(prefix: &Path) -> R<()> {
         Err("all repositories failed".into())
     } else {
         Ok(())
+    }
+}
+
+// ------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(n: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("akg-repo-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn src(sb: Option<&str>) -> Source {
+        Source {
+            uri: "https://example.org/repo".into(),
+            suite: "stable".into(),
+            comps: vec!["main".into()],
+            signed_by: sb.map(String::from),
+        }
+    }
+
+    fn with_global_key(p: &Path) {
+        let d = p.join("etc/apt/trusted.gpg.d");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("a.gpg"), b"not a real key").unwrap();
+    }
+
+    #[test]
+    fn signed_by_has_no_fallback_to_global_keys() {
+        let p = tmp("sb");
+        with_global_key(&p);
+        assert_eq!(keyrings(&p, &None).len(), 1);
+        assert!(keyrings(&p, &Some("/nonexistent/key.gpg".into())).is_empty());
+    }
+
+    #[test]
+    fn inrelease_without_keys_fails() {
+        let p = tmp("nokeys");
+        assert!(verify_inrelease(&p, &src(None), "https://example.org/repo", b"Origin: x\n").is_err());
+    }
+
+    #[test]
+    fn inrelease_signed_by_missing_key_fails_even_with_global_keys() {
+        let p = tmp("sbmiss");
+        with_global_key(&p);
+        let s = src(Some("/nonexistent/key.gpg"));
+        assert!(verify_inrelease(&p, &s, "https://example.org/repo", b"Origin: x\n").is_err());
+    }
+
+    #[test]
+    fn detached_without_signature_fails() {
+        let p = tmp("nosig");
+        assert!(verify_detached(&p, &src(None), "https://example.org/repo", b"x", None).is_err());
+        with_global_key(&p);
+        assert!(verify_detached(&p, &src(None), "https://example.org/repo", b"x", None).is_err());
     }
 }
