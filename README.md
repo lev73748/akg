@@ -26,6 +26,12 @@ Compatible with the apt/dpkg package format and repository layout.
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install akg
+```
+
 ### From source
 
 ```bash
@@ -156,6 +162,12 @@ MIT License. See [LICENSE](LICENSE).
 - Атомарные обновления базы status
 - Режимы dry-run и download-only
 - Тестовый root через `AKG_ROOT`
+
+### Установка из crates.io
+
+```bash
+cargo install akg
+```
 
 ### Установка из исходников
 
