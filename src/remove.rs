@@ -1,18 +1,21 @@
 // Удаление по логике dpkg remove.c: prerm, файлы в обратном порядке, postrm,
 // config-files, purge. Плюс autoremove по меткам auto-installed.
+// Прогресс и тайминги — как в install.rs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::db::*;
 use crate::deb::load_owners;
 use crate::install::{confirm, run_script};
+use crate::progress;
 use crate::resolve;
 use crate::util::*;
 
 const BACKUP_EXTS: &[&str] = &[
-    "~",
+    "\~",
     ".bak",
     "%",
     ".dpkg-tmp",
@@ -24,8 +27,8 @@ const BACKUP_EXTS: &[&str] = &[
 
 fn is_numbered(suf: &str) -> bool {
     suf.len() > 2
-        && suf.starts_with('~')
-        && suf.ends_with('~')
+        && suf.starts_with('\~')
+        && suf.ends_with('\~')
         && suf[1..suf.len() - 1].bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -48,7 +51,6 @@ fn purge_one(
     owners: &HashMap<String, Vec<String>>,
     removed: &HashSet<String>,
 ) -> R<()> {
-    println!("  {} {}", paint("36", "purging"), name);
     for (cf, _) in conffiles_of(stanza) {
         let p = cfg.fs(&cf);
         let _ = fs::remove_file(&p);
@@ -115,7 +117,6 @@ fn remove_one(
 ) -> R<()> {
     let info = cfg.info();
     let status_path = cfg.admin().join("status");
-    println!("  {} {}", paint("36", "removing"), name);
 
     run_script(
         cfg,
@@ -163,11 +164,11 @@ fn remove_one(
             let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-tmp"));
             let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-new"));
             if let Err(e) = fs::remove_file(&fsp) {
-                eprintln!(
+                progress::emit(&format!(
                     "{} cannot remove {}: {e}",
                     paint("33", "warning:"),
                     fsp.display()
-                );
+                ));
             }
         }
     }
@@ -281,30 +282,48 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     let order = resolve::removal_order(&inst, &set);
     let mut result: R<()> = Ok(());
 
-    for n in &order {
-        let stanza = match db.get(n) {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        let arch = inst.get(n).map(|e| e.arch.clone()).unwrap_or_default();
-        match remove_one(cfg, n, &arch, &stanza, purge, &owners, &removed, &mut db) {
-            Ok(()) => {
-                removed.insert(n.clone());
-                marks.remove(n);
-            }
-            Err(e) => {
-                result = Err(format!("{n}: {e}"));
-                break;
+    let t0 = Instant::now();
+    let mut t_remove = Duration::ZERO;
+    let mut t_purge = Duration::ZERO;
+
+    // фаза Remove (remove_one; внутри может быть purge, если --purge)
+    if !order.is_empty() {
+        let t = Instant::now();
+        let total = order.len();
+        let label = if purge { "Purge     " } else { "Remove    " };
+        for (i, n) in order.iter().enumerate() {
+            let stanza = match db.get(n) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            let arch = inst.get(n).map(|e| e.arch.clone()).unwrap_or_default();
+            progress::step(label, i, total, n);
+            match remove_one(cfg, n, &arch, &stanza, purge, &owners, &removed, &mut db) {
+                Ok(()) => {
+                    removed.insert(n.clone());
+                    marks.remove(n);
+                }
+                Err(e) => {
+                    result = Err(format!("{n}: {e}"));
+                    break;
+                }
             }
         }
+        t_remove = t.elapsed();
+        progress::clear_line();
     }
-    if result.is_ok() {
-        for n in &cfg_only {
+
+    // фаза Purge для config-files only
+    if result.is_ok() && !cfg_only.is_empty() {
+        let t = Instant::now();
+        let total = cfg_only.len();
+        for (i, n) in cfg_only.iter().enumerate() {
             let stanza = match db.get(n) {
                 Some(s) => s.clone(),
                 None => continue,
             };
             let arch = field(&stanza, "Architecture").unwrap_or_default();
+            progress::step("Purge     ", i, total, n);
             if let Err(e) = purge_one(cfg, n, &arch, &stanza, &owners, &removed) {
                 result = Err(format!("{n}: {e}"));
                 break;
@@ -313,17 +332,39 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
             marks.remove(n);
             removed.insert(n.clone());
         }
+        t_purge = t.elapsed();
+        progress::clear_line();
+        warn(db.save(&cfg.admin().join("status")));
+    } else if result.is_ok() {
         warn(db.save(&cfg.admin().join("status")));
     }
+
     warn(marks.save(cfg));
     for p in ["usr/share"] {
         let _ = Path::new(p);
     }
     result?;
+
+    progress::clear_line();
     println!(
-        "{} {} package(s) processed",
+        "{} {} package(s) processed in {}",
         paint("1;32", "akg:"),
-        removed.len()
+        removed.len(),
+        progress::fmt_dur(t0.elapsed())
     );
+    let mut parts = Vec::new();
+    if t_remove > Duration::ZERO {
+        parts.push(format!(
+            "{} {}",
+            if purge { "purge" } else { "remove" },
+            progress::fmt_dur(t_remove)
+        ));
+    }
+    if t_purge > Duration::ZERO {
+        parts.push(format!("purge {}", progress::fmt_dur(t_purge)));
+    }
+    if !parts.is_empty() {
+        println!("     {}", parts.join(" · "));
+    }
     Ok(0)
 }
