@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::db::*;
@@ -339,6 +340,9 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     }
 
     warn(marks.save(cfg));
+    for p in ["usr/share"] {
+        let _ = Path::new(p);
+    }
     result?;
 
     progress::clear_line();
