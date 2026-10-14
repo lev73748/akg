@@ -15,14 +15,7 @@ use crate::resolve;
 use crate::util::*;
 
 const BACKUP_EXTS: &[&str] = &[
-    "~",
-    ".bak",
-    "%",
-    ".dpkg-tmp",
-    ".dpkg-new",
-    ".dpkg-old",
-    ".dpkg-dist",
-    ".dpkg-bak",
+    "~", ".bak", "%", ".dpkg-tmp", ".dpkg-new", ".dpkg-old", ".dpkg-dist", ".dpkg-bak",
 ];
 
 fn is_numbered(suf: &str) -> bool {
@@ -72,16 +65,17 @@ fn purge_one(
             }
         }
     }
-    run_script(
-        cfg,
-        name,
-        arch,
-        &cfg.info().join(format!("{name}.postrm")),
-        "postrm",
-        &["purge"],
-    )?;
 
-    let lp = cfg.info().join(format!("{name}.list"));
+    let mut postrm_name = name.to_owned();
+    postrm_name.push_str(".postrm");
+    let postrm_path = cfg.info().join(&postrm_name);
+    if postrm_path.exists() {
+        run_script(cfg, name, arch, &postrm_path, "postrm", &["purge"])?;
+    }
+
+    let mut list_name = name.to_owned();
+    list_name.push_str(".list");
+    let lp = cfg.info().join(&list_name);
     if let Ok(b) = fs::read(&lp) {
         let text = String::from_utf8_lossy(&b).into_owned();
         for l in text.lines().rev() {
@@ -91,11 +85,13 @@ fn purge_one(
             let _ = fs::remove_dir(cfg.fs(l));
         }
     }
-    let pre = format!("{name}.");
+
+    let mut prefix = name.to_owned();
+    prefix.push('.');
     if let Ok(rd) = fs::read_dir(cfg.info()) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(suf) = n.strip_prefix(pre.as_str()) {
+            if let Some(suf) = n.strip_prefix(prefix.as_str()) {
                 if !suf.contains('.') {
                     let _ = fs::remove_file(e.path());
                 }
@@ -118,14 +114,13 @@ fn remove_one(
     let info = cfg.info();
     let status_path = cfg.admin().join("status");
 
-    run_script(
-        cfg,
-        name,
-        arch,
-        &info.join(format!("{name}.prerm")),
-        "prerm",
-        &["remove"],
-    )?;
+    let mut prerm_name = name.to_owned();
+    prerm_name.push_str(".prerm");
+    let prerm_path = info.join(&prerm_name);
+    if prerm_path.exists() {
+        run_script(cfg, name, arch, &prerm_path, "prerm", &["remove"])?;
+    }
+
     db.set(
         name,
         set_status(stanza, "deinstall reinstreq half-installed"),
@@ -133,7 +128,10 @@ fn remove_one(
     db.save(&status_path)?;
 
     let conf: HashSet<String> = conffiles_of(stanza).into_iter().map(|(n, _)| n).collect();
-    let lp = info.join(format!("{name}.list"));
+
+    let mut list_name = name.to_owned();
+    list_name.push_str(".list");
+    let lp = info.join(&list_name);
     let text = fs::read(&lp)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
@@ -179,21 +177,20 @@ fn remove_one(
     }
     write_atomic(&lp, s.as_bytes())?;
 
-    run_script(
-        cfg,
-        name,
-        arch,
-        &info.join(format!("{name}.postrm")),
-        "postrm",
-        &["remove"],
-    )?;
+    let mut postrm_name = name.to_owned();
+    postrm_name.push_str(".postrm");
+    let postrm_path = info.join(&postrm_name);
+    let has_postrm = postrm_path.exists();
+    if has_postrm {
+        run_script(cfg, name, arch, &postrm_path, "postrm", &["remove"])?;
+    }
 
-    let has_postrm = info.join(format!("{name}.postrm")).exists();
-    let pre = format!("{name}.");
+    let mut prefix = name.to_owned();
+    prefix.push('.');
     if let Ok(rd) = fs::read_dir(&info) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(suf) = n.strip_prefix(pre.as_str()) {
+            if let Some(suf) = n.strip_prefix(prefix.as_str()) {
                 if !suf.contains('.') && suf != "list" && suf != "postrm" {
                     let _ = fs::remove_file(e.path());
                 }
@@ -334,15 +331,13 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
         }
         t_purge = t.elapsed();
         progress::clear_line();
-        warn(db.save(&cfg.admin().join("status")));
-    } else if result.is_ok() {
+    }
+
+    if result.is_ok() {
         warn(db.save(&cfg.admin().join("status")));
     }
 
     warn(marks.save(cfg));
-    for p in ["usr/share"] {
-        let _ = Path::new(p);
-    }
     result?;
 
     progress::clear_line();
