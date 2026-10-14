@@ -1,27 +1,11 @@
 # akg
 
-[
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)](https://termux.dev/)
+[![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](https://github.com/lev73748/akg)
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-
-](LICENSE)
-[
-
-![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)
-
-](https://www.rust-lang.org/)
-[
-
-![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)
-
-](https://termux.dev/)
-[
-
-![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)
-
-](https://github.com/lev73748/akg)
-
-Fast package manager for Termux written in Rust.
+Fast package manager for Termux written in Rust.  
 Compatible with the apt/dpkg package format and repository layout.
 
 ---
@@ -29,11 +13,11 @@ Compatible with the apt/dpkg package format and repository layout.
 ## Features
 
 - Parallel package downloads and unpacking
-- Progress bars: speed, ETA, packages done, time of every phase
+- Progress bars for install **and** remove/purge: speed, ETA, packages done, time of every phase
 - Dependency resolution (Depends, Pre-Depends, Conflicts, Breaks, Provides, Replaces)
-- Local `.deb` installation (file path or URL), no download needed for files
-- Custom repositories via `--repo` (just an address, no `sources.list` editing)
-- Repository signature check and SHA-256 check of indexes and packages
+- Local `.deb` installation (file path or URL)
+- Custom repositories via `--repo` (no need to edit `sources.list`)
+- Repository signature check and SHA-256 verification of indexes and packages
 - Maintainer scripts and dpkg-style triggers
 - Auto-installed marks (apt-compatible)
 - Atomic status database updates
@@ -75,39 +59,39 @@ akg -f <file.deb>
 
 ### Commands
 
-| Command            | Aliases          | Description                          |
-|--------------------|------------------|--------------------------------------|
-| `update`           | `upd`            | Refresh package index                |
-| `install`          | `i`, `add`       | Install packages, local `.deb` files or `.deb` links |
-| `reinstall`        | `rei`            | Reinstall packages                   |
-| `upgrade`          | `up`, `upg`      | Upgrade all packages                 |
-| `uninstall`        | `remove`, `rm`   | Remove packages + unused deps        |
-| `purge`            |                  | Remove including config files        |
-| `autoremove`       |                  | Remove unused dependencies           |
-| `search`           | `se`             | Search packages                      |
-| `show`             | `sh`, `info`     | Show package details                 |
-| `files`            | `f`              | List files of an installed package   |
-| `list-installed`   | `list-i`         | List installed packages              |
-| `clean`            |                  | Delete cached `.deb` files           |
+| Command          | Aliases        | Description                                      |
+|------------------|----------------|--------------------------------------------------|
+| `update`         | `upd`          | Refresh package index                            |
+| `install`        | `i`, `add`     | Install packages, local `.deb` files or `.deb` URLs |
+| `reinstall`      | `rei`          | Reinstall packages                               |
+| `upgrade`        | `up`, `upg`    | Upgrade all packages                             |
+| `uninstall`      | `remove`, `rm` | Remove packages + unused dependencies            |
+| `purge`          |                | Remove including config files                    |
+| `autoremove`     |                | Remove unused dependencies                       |
+| `search`         | `se`           | Search packages                                  |
+| `show`           | `sh`, `info`   | Show package details                             |
+| `files`          | `f`            | List files of an installed package               |
+| `list-installed` | `list-i`       | List installed packages                          |
+| `clean`          |                | Delete cached `.deb` files                       |
 
 ### Options
 
-| Option                  | Description                                      |
-|-------------------------|--------------------------------------------------|
-| `-y`, `--yes`           | Assume yes                                       |
-| `-j`, `--jobs N`        | Number of parallel downloads                     |
-| `-f`, `--file PATH`     | Install local `.deb` (path or URL), repeatable   |
-| `-r`, `--repo URL`      | Use custom repository instead of sources.list, repeatable. A link to a `.deb` installs that file |
-| `--suite NAME`          | Repository suite (default: `stable`)             |
-| `--comp NAME`           | Repository component (default: `main`)           |
-| `--no-verify`           | Skip Release signature check (prints a warning)  |
-| `--download-only`       | Only download `.deb` files                       |
-| `--dry-run`             | Show the plan without making changes             |
-| `--no-scripts`          | Do not run maintainer scripts                    |
-| `--no-triggers`         | Do not run triggers                              |
-| `--force-overwrite`     | Allow overwriting files of other packages        |
-| `-V`, `--version`       | Print version                                    |
-| `-h`, `--help`          | Show help                                        |
+| Option                | Description                                                                 |
+|-----------------------|-----------------------------------------------------------------------------|
+| `-y`, `--yes`         | Assume yes                                                                  |
+| `-j`, `--jobs N`      | Number of parallel downloads                                                |
+| `-f`, `--file PATH`   | Install local `.deb` (path or URL), repeatable                              |
+| `-r`, `--repo URL`    | Use custom repository instead of sources.list, repeatable. A link to a `.deb` installs that file |
+| `--suite NAME`        | Repository suite (default: `stable`)                                        |
+| `--comp NAME`         | Repository component (default: `main`)                                      |
+| `--no-verify`         | Skip Release signature check (prints a warning)                             |
+| `--download-only`     | Only download `.deb` files                                                  |
+| `--dry-run`           | Show the plan without making changes                                        |
+| `--no-scripts`        | Do not run maintainer scripts                                               |
+| `--no-triggers`       | Do not run triggers                                                         |
+| `--force-overwrite`   | Allow overwriting files of other packages                                   |
+| `-V`, `--version`     | Print version                                                               |
+| `-h`, `--help`        | Show help                                                                   |
 
 Options can also be written as `--opt=value`.
 
@@ -143,30 +127,43 @@ akg upgrade
 # Remove package and unused dependencies
 akg uninstall nodejs
 
+# Purge (remove + config files)
+akg purge nodejs
+
 # Search
 akg search python
 ```
 
-A local `.deb` is installed as is. akg only warns if its dependencies are missing. The package architecture must match the device (or be `all`).
+A local `.deb` is installed as-is. akg only warns if its dependencies are missing. The package architecture must match the device (or be `all`).
 
 ### Progress output
 
-When stderr is a terminal, akg shows a download bar (percent, speed, ETA, packages done, bytes), an unpack bar, and one-line steps for unpacking, configuring and triggers. At the end it prints the total time and the time of each phase:
+When stderr is a terminal, akg shows:
+
+- **Install**: download bar (percent, speed, ETA, packages done), extract bar, and one-line steps for Install / Configure / Trigger
+- **Remove / Purge**: progress bar for Remove or Purge phase
+
+At the end it prints the total time and the time of each phase:
 
 ```
 akg: 5 package(s) processed in 12.4s
      fetch 8.1s · unpack 1.2s · configure 2.4s · triggers 0.3s
 ```
 
+```
+akg: 3 package(s) processed in 1.8s
+     remove 1.8s
+```
+
 When output is not a terminal (pipe, log file), plain lines are printed instead of bars.
 
 ### Environment
 
-| Variable     | Description                                      |
-|--------------|--------------------------------------------------|
-| `PREFIX`     | Termux prefix (default: `/data/data/com.termux/files/usr`) |
-| `AKG_ROOT`   | Optional root for testing (e.g. `$HOME/fakeroot`) |
-| `AKG_ARCH`   | Force architecture                               |
+| Variable   | Description                                                        |
+|------------|--------------------------------------------------------------------|
+| `PREFIX`   | Termux prefix (default: `/data/data/com.termux/files/usr`)         |
+| `AKG_ROOT` | Optional root for testing (e.g. `$HOME/fakeroot`)                  |
+| `AKG_ARCH` | Force architecture                                                 |
 
 Test mode example:
 
@@ -183,6 +180,8 @@ AKG_ROOT=$HOME/fakeroot akg install -y --no-scripts <pkg>
 - Paths inside a package are validated before anything is written: `..` is rejected and files can only be written inside `$PREFIX`.
 
 Found a problem? Please open an issue.
+
+---
 
 ## Triggers
 
@@ -209,15 +208,15 @@ MIT License. See [LICENSE](LICENSE).
 
 ## На русском
 
-Быстрый пакетный менеджер для Termux, написанный на Rust.
+Быстрый пакетный менеджер для Termux, написанный на Rust.  
 Совместим с форматом пакетов и репозиториев apt/dpkg.
 
 ### Возможности
 
 - Параллельная загрузка и распаковка пакетов
-- Прогресс-бары: скорость, оставшееся время, сколько пакетов готово, время каждого этапа
+- Прогресс-бары для установки **и** удаления/purge: скорость, оставшееся время, сколько пакетов готово, время каждого этапа
 - Разрешение зависимостей (Depends, Pre-Depends, Conflicts, Breaks, Provides, Replaces)
-- Установка локальных `.deb` (путь или URL), для файлов ничего не скачивается
+- Установка локальных `.deb` (путь или URL)
 - Свои репозитории через `--repo` (достаточно адреса, `sources.list` править не нужно)
 - Проверка подписи репозитория и SHA-256 индексов и пакетов
 - Maintainer-скрипты и триггеры в стиле dpkg
@@ -248,39 +247,39 @@ cp target/release/akg $PREFIX/bin/
 
 ### Основные команды
 
-| Команда            | Алиасы           | Описание                             |
-|--------------------|------------------|--------------------------------------|
-| `update`           | `upd`            | Обновить индекс                      |
-| `install`          | `i`, `add`       | Установить пакеты, локальные `.deb` или ссылки на `.deb` |
-| `reinstall`        | `rei`            | Переустановить                       |
-| `upgrade`          | `up`, `upg`      | Обновить все пакеты                  |
-| `uninstall`        | `remove`, `rm`   | Удалить + неиспользуемые зависимости |
-| `purge`            |                  | Удалить вместе с конфигами           |
-| `autoremove`       |                  | Удалить неиспользуемые зависимости   |
-| `search`           | `se`             | Поиск пакетов                        |
-| `show`             | `sh`, `info`     | Информация о пакете                  |
-| `files`            | `f`              | Список файлов установленного пакета  |
-| `list-installed`   | `list-i`         | Список установленных пакетов         |
-| `clean`            |                  | Очистить кэш `.deb`                  |
+| Команда          | Алиасы         | Описание                                             |
+|------------------|----------------|------------------------------------------------------|
+| `update`         | `upd`          | Обновить индекс                                      |
+| `install`        | `i`, `add`     | Установить пакеты, локальные `.deb` или ссылки на `.deb` |
+| `reinstall`      | `rei`          | Переустановить                                       |
+| `upgrade`        | `up`, `upg`    | Обновить все пакеты                                  |
+| `uninstall`      | `remove`, `rm` | Удалить + неиспользуемые зависимости                 |
+| `purge`          |                | Удалить вместе с конфигами                           |
+| `autoremove`     |                | Удалить неиспользуемые зависимости                   |
+| `search`         | `se`           | Поиск пакетов                                        |
+| `show`           | `sh`, `info`   | Информация о пакете                                  |
+| `files`          | `f`            | Список файлов установленного пакета                  |
+| `list-installed` | `list-i`       | Список установленных пакетов                         |
+| `clean`          |                | Очистить кэш `.deb`                                  |
 
 ### Опции
 
-| Опция                   | Описание                                         |
-|-------------------------|--------------------------------------------------|
-| `-y`, `--yes`           | Отвечать «да» на вопросы                         |
-| `-j`, `--jobs N`        | Число параллельных загрузок                      |
-| `-f`, `--file PATH`     | Установить локальный `.deb` (путь или URL), можно несколько раз |
-| `-r`, `--repo URL`      | Использовать свой репозиторий вместо sources.list, можно несколько раз. Ссылка на `.deb` ставит этот файл |
-| `--suite NAME`          | Suite репозитория (по умолчанию `stable`)        |
-| `--comp NAME`           | Компонент репозитория (по умолчанию `main`)      |
-| `--no-verify`           | Не проверять подпись Release (с предупреждением) |
-| `--download-only`       | Только скачать `.deb`                            |
-| `--dry-run`             | Показать план без изменений                      |
-| `--no-scripts`          | Не запускать maintainer-скрипты                  |
-| `--no-triggers`         | Не запускать триггеры                            |
-| `--force-overwrite`     | Разрешить перезапись файлов других пакетов       |
-| `-V`, `--version`       | Версия                                           |
-| `-h`, `--help`          | Справка                                          |
+| Опция                 | Описание                                                                      |
+|-----------------------|-------------------------------------------------------------------------------|
+| `-y`, `--yes`         | Отвечать «да» на вопросы                                                      |
+| `-j`, `--jobs N`      | Число параллельных загрузок                                                   |
+| `-f`, `--file PATH`   | Установить локальный `.deb` (путь или URL), можно несколько раз               |
+| `-r`, `--repo URL`    | Использовать свой репозиторий вместо sources.list, можно несколько раз. Ссылка на `.deb` ставит этот файл |
+| `--suite NAME`        | Suite репозитория (по умолчанию `stable`)                                     |
+| `--comp NAME`         | Компонент репозитория (по умолчанию `main`)                                   |
+| `--no-verify`         | Не проверять подпись Release (с предупреждением)                              |
+| `--download-only`     | Только скачать `.deb`                                                         |
+| `--dry-run`           | Показать план без изменений                                                   |
+| `--no-scripts`        | Не запускать maintainer-скрипты                                               |
+| `--no-triggers`       | Не запускать триггеры                                                         |
+| `--force-overwrite`   | Разрешить перезапись файлов других пакетов                                    |
+| `-V`, `--version`     | Версия                                                                        |
+| `-h`, `--help`        | Справка                                                                       |
 
 Опции можно писать и как `--opt=value`.
 
@@ -296,6 +295,7 @@ akg -r mirror.yandex.ru/mirrors/termux/termux-main install fish
 akg install --download-only neovim
 akg upgrade
 akg uninstall nodejs
+akg purge nodejs
 akg search python
 ```
 
@@ -303,7 +303,12 @@ akg search python
 
 ### Прогресс
 
-Если вывод идёт в терминал, akg показывает бар загрузки (проценты, скорость, оставшееся время, сколько пакетов готово), бар распаковки и однострочные шаги для распаковки, конфигурации и триггеров. В конце печатается общее время и время каждого этапа. Если вывод не в терминал (пайп, лог), печатаются обычные строки.
+Если вывод идёт в терминал, akg показывает:
+
+- **Установка**: бар загрузки (проценты, скорость, ETA, сколько пакетов готово), бар распаковки и шаги Install / Configure / Trigger
+- **Удаление / purge**: прогресс-бар фазы Remove или Purge
+
+В конце печатается общее время и время каждого этапа. Если вывод не в терминал (пайп, лог), печатаются обычные строки.
 
 ### Безопасность
 
@@ -319,11 +324,11 @@ akg запускает триггеры в стиле dpkg из файлов `*.
 
 ### Переменные окружения
 
-| Переменная   | Описание                                         |
-|--------------|--------------------------------------------------|
-| `PREFIX`     | Префикс Termux (по умолчанию `/data/data/com.termux/files/usr`) |
-| `AKG_ROOT`   | Корневой каталог для тестов                      |
-| `AKG_ARCH`   | Принудительная архитектура                       |
+| Переменная | Описание                                                        |
+|------------|-----------------------------------------------------------------|
+| `PREFIX`   | Префикс Termux (по умолчанию `/data/data/com.termux/files/usr`) |
+| `AKG_ROOT` | Корневой каталог для тестов                                     |
+| `AKG_ARCH` | Принудительная архитектура                                      |
 
 ### Лицензия
 
