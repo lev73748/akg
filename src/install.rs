@@ -1,618 +1,272 @@
-// Установка: каждый пакет скачивается и сразу распаковывается в своей задаче.
-// Локальные .deb ставятся без сети. После установки запускаются триггеры.
-// Кэш .deb переиспользуется только после проверки sha256.
-// Прогресс: см. progress.rs, тайминги этапов печатаются в конце.
+// Удаление по логике dpkg remove.c: prerm, файлы в обратном порядке, postrm,
+// config-files, purge. Плюс autoremove по меткам auto-installed.
+// Прогресс и тайминги — как в install.rs.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, Permissions};
-use std::io::{self, BufRead, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::fs;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-use tokio::sync::Semaphore;
-
 use crate::db::*;
-use crate::deb::*;
-use crate::net::{self, Job};
-use crate::progress::{self, Renderer, Shared};
-use crate::repo::{parse_dep_list, Entry, Index};
-use crate::resolve::{self, Request};
-use crate::triggers;
+use crate::deb::load_owners;
+use crate::install::{confirm, run_script};
+use crate::progress;
+use crate::resolve;
 use crate::util::*;
 
-pub static NO_TRIGGERS: AtomicBool = AtomicBool::new(false);
-pub static DOWNLOAD_ONLY: AtomicBool = AtomicBool::new(false);
+const BACKUP_EXTS: &[&str] = &[
+    "~",
+    ".bak",
+    "%",
+    ".dpkg-tmp",
+    ".dpkg-new",
+    ".dpkg-old",
+    ".dpkg-dist",
+    ".dpkg-bak",
+];
 
-#[derive(Default)]
-struct Timings {
-    fetch: Duration,
-    unpack: Duration,
-    configure: Duration,
-    triggers: Duration,
+fn is_numbered(suf: &str) -> bool {
+    suf.len() > 2
+        && suf.starts_with('~')
+        && suf.ends_with('~')
+        && suf[1..suf.len() - 1].bytes().all(|b| b.is_ascii_digit())
 }
 
-pub fn confirm(cfg: &Cfg) -> bool {
-    if cfg.yes {
-        return true;
-    }
-    eprint!("Continue? [Y/n] ");
-    let mut l = String::new();
-    if io::stdin().read_line(&mut l).is_err() {
-        return false;
-    }
-    let l = l.trim().to_lowercase();
-    !(l == "n" || l == "no")
-}
-
-// предупреждение, не ломающее строку прогресса
-fn pwarn(r: R<()>) {
-    if let Err(e) = r {
-        progress::emit(&format!("{} {}", paint("33", "warning:"), e));
-    }
-}
-
-// читает вывод скрипта построчно и печатает над баром
-fn pump<T: Read>(r: T) {
-    let mut br = io::BufReader::new(r);
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        buf.clear();
-        match br.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => progress::emit(&String::from_utf8_lossy(&buf)),
-        }
-    }
-}
-
-pub fn run_script(cfg: &Cfg, pkg: &str, arch: &str, path: &Path, name: &str, args: &[&str]) -> R<()> {
-    if !cfg.scripts_enabled() || !path.exists() {
-        return Ok(());
-    }
-    let _ = fs::set_permissions(path, Permissions::from_mode(0o755));
-    let mut cmd = Command::new(path);
-    cmd.args(args)
-        .current_dir("/")
-        .env("DPKG_MAINTSCRIPT_PACKAGE", pkg)
-        .env("DPKG_MAINTSCRIPT_ARCH", arch)
-        .env("DPKG_MAINTSCRIPT_NAME", name)
-        .env("DPKG_MAINTSCRIPT_DEBUG", "0")
-        .env("DPKG_ADMINDIR", cfg.admin());
-    let fail = |e: io::Error| format!("cannot run {name} of {pkg}: {e}");
-
-    let status = if progress::bar_active() {
-        // бар на экране: вывод скрипта пропускаем через emit()
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(fail)?;
-        let finished = Arc::new(AtomicUsize::new(0));
-        let mut want = 0usize;
-        if let Some(o) = child.stdout.take() {
-            want += 1;
-            let f = finished.clone();
-            thread::spawn(move || {
-                pump(o);
-                f.fetch_add(1, Ordering::Relaxed);
-            });
-        }
-        if let Some(er) = child.stderr.take() {
-            want += 1;
-            let f = finished.clone();
-            thread::spawn(move || {
-                pump(er);
-                f.fetch_add(1, Ordering::Relaxed);
-            });
-        }
-        let st = child.wait().map_err(fail)?;
-        // если скрипт оставил фоновый процесс с открытым выводом, долго не ждём
-        let t = Instant::now();
-        while finished.load(Ordering::Relaxed) < want && t.elapsed() < Duration::from_millis(500) {
-            thread::sleep(Duration::from_millis(5));
-        }
-        st
-    } else {
-        cmd.status().map_err(fail)?
-    };
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{name} script of {pkg} failed ({status})"))
-    }
-}
-
-// ------------------------------------------------------------ checks
-
-/// Архитектура пакета подходит устройству (или "all"). Пустая — не подходит.
-fn arch_ok(pkg_arch: &str, device: &str) -> bool {
-    pkg_arch == "all" || pkg_arch == device
-}
-
-fn sha256_file(p: &Path) -> io::Result<String> {
-    let mut f = File::open(p)?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 128 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(hex(h.finalize().as_slice()))
-}
-
-/// Файл из кэша годится только если совпали и размер, и sha256 из индекса.
-fn cache_valid(p: &Path, size: u64, want: &str) -> bool {
-    let Ok(md) = fs::metadata(p) else { return false };
-    if !md.is_file() || (size > 0 && md.len() != size) {
-        return false;
-    }
-    sha256_file(p).map_or(false, |h| h == want)
-}
-
-// ------------------------------------------------------------ transaction
-
-#[derive(Clone, Copy, PartialEq)]
-enum St {
-    Pending,
-    HalfInstalled,
-    Unpacked,
-    HalfConfigured,
-    Installed,
-}
-
-struct Rec {
-    pkg: Pkg,
-    ex: Option<Extracted>,
-    st: St,
-    conf: Vec<(String, String)>,
-    old_version: Option<String>,
-}
-
-fn rename_new(newp: &Path, fsp: &Path) -> R<()> {
-    fs::rename(newp, fsp).map_err(|e| format!("cannot install {}: {e}", fsp.display()))
-}
-
-fn apply_steals(cfg: &Cfg, steals: &[(String, String)]) {
-    let mut by: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (o, p) in steals {
-        by.entry(o.as_str()).or_default().insert(p.as_str());
-    }
-    for (o, set) in by {
-        let lp = cfg.info().join(format!("{o}.list"));
-        if let Ok(b) = fs::read(&lp) {
-            let t = String::from_utf8_lossy(&b);
-            let keep: Vec<&str> = t.lines().filter(|l| !set.contains(l)).collect();
-            let mut s = keep.join("\n");
-            s.push('\n');
-            pwarn(write_atomic(&lp, s.as_bytes()));
-        }
-    }
-}
-
-fn remove_old_files(
-    cfg: &Cfg,
-    pkg: &Pkg,
-    ex: &Extracted,
-    old: &OldInfo,
+fn used_by_others(
     owners: &HashMap<String, Vec<String>>,
-) {
-    let lp = cfg.info().join(format!("{}.list", pkg.name));
-    let t = match fs::read(&lp) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-        Err(_) => return,
-    };
-    let newset: HashSet<&str> = ex.entries.iter().map(|e| e.name.as_str()).collect();
-    let lines: Vec<&str> = t.lines().collect();
-    for l in lines.iter().rev() {
-        let l = *l;
-        if l.is_empty() || l == "/." || newset.contains(l) {
-            continue;
-        }
-        if owners.get(l).map_or(false, |os| os.iter().any(|o| *o != pkg.name)) {
-            continue;
-        }
-        if old.conf.contains_key(l) {
-            continue;
-        }
-        let fsp = cfg.fs(l);
-        match fs::symlink_metadata(&fsp) {
-            Ok(md) if md.is_dir() => {
-                let _ = fs::remove_dir(&fsp);
-            }
-            Ok(_) => {
-                let _ = fs::remove_file(&fsp);
-            }
-            Err(_) => {}
-        }
-    }
+    path: &str,
+    me: &str,
+    removed: &HashSet<String>,
+) -> bool {
+    owners
+        .get(path)
+        .map_or(false, |v| v.iter().any(|o| o != me && !removed.contains(o)))
 }
 
-fn write_info(cfg: &Cfg, pkg: &Pkg, tmpci: &Path, ex: &Extracted) -> R<()> {
-    let info = cfg.info();
-    const KNOWN: &[&str] = &[
-        "conffiles", "preinst", "postinst", "prerm", "postrm", "triggers", "shlibs", "symbols",
-        "config", "templates",
-    ];
-    for k in KNOWN {
-        if !pkg.files.contains_key(*k) {
-            let _ = fs::remove_file(info.join(format!("{}.{}", pkg.name, k)));
-        }
-    }
-    for n in pkg.files.keys() {
-        if n == "control" || n.is_empty() || n.contains('/') {
-            continue;
-        }
-        let dst = info.join(format!("{}.{}", pkg.name, n));
-        fs::rename(tmpci.join(n), &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
-    }
-    let mut list = String::from("/.\n");
-    for en in &ex.entries {
-        list.push_str(&en.name);
-        list.push('\n');
-    }
-    write_atomic(&info.join(format!("{}.list", pkg.name)), list.as_bytes())?;
-    if !pkg.files.contains_key("md5sums") {
-        let mut s = String::new();
-        for en in &ex.entries {
-            if let Some(h) = &en.md5 {
-                s.push_str(&format!("{}  {}\n", h, &en.name[1..]));
-            }
-        }
-        write_atomic(&info.join(format!("{}.md5sums", pkg.name)), s.as_bytes())?;
-    }
-    Ok(())
-}
-
-fn unpack_inner(
+fn purge_one(
     cfg: &Cfg,
-    pkg: &Pkg,
-    ex: &Extracted,
-    old: Option<&OldInfo>,
+    name: &str,
+    arch: &str,
+    stanza: &str,
     owners: &HashMap<String, Vec<String>>,
-    st: &mut St,
-    conf: &mut Vec<(String, String)>,
+    removed: &HashSet<String>,
 ) -> R<()> {
-    let info = cfg.info();
-    let tmpci = cfg.admin().join("tmp.ci").join(&pkg.name);
-    let _ = fs::remove_dir_all(&tmpci);
-    fs::create_dir_all(&tmpci).map_err(|e| format!("{}: {e}", tmpci.display()))?;
-    for (n, data) in &pkg.files {
-        if n == "control" || n.is_empty() || n.contains('/') {
-            continue;
-        }
-        let p = tmpci.join(n);
-        fs::write(&p, data).map_err(|e| format!("{}: {e}", p.display()))?;
-        let script = matches!(n.as_str(), "preinst" | "postinst" | "prerm" | "postrm" | "config");
-        let _ = fs::set_permissions(&p, Permissions::from_mode(if script { 0o755 } else { 0o644 }));
-    }
-
-    if old.is_some() {
-        pwarn(run_script(
-            cfg,
-            &pkg.name,
-            &pkg.arch,
-            &info.join(format!("{}.prerm", pkg.name)),
-            "prerm",
-            &["upgrade", &pkg.version],
-        ));
-    }
-    let pre = tmpci.join("preinst");
-    match old {
-        Some(o) => run_script(cfg, &pkg.name, &pkg.arch, &pre, "preinst", &["upgrade", &o.version])?,
-        None => run_script(cfg, &pkg.name, &pkg.arch, &pre, "preinst", &["install"])?,
-    }
-    *st = St::HalfInstalled;
-
-    let conf_set: HashSet<&str> = pkg.conffiles.iter().map(|s| s.as_str()).collect();
-    let empty: HashMap<String, String> = HashMap::new();
-    let old_conf = old.map(|o| &o.conf).unwrap_or(&empty);
-    let mut conf_new: Vec<(String, String)> = Vec::new();
-
-    for en in &ex.entries {
-        if !en.pending {
-            continue;
-        }
-        let fsp = cfg.fs(&en.name);
-        let newp = with_suffix(&fsp, ".dpkg-new");
-        if en.kind == Kind::File && conf_set.contains(en.name.as_str()) {
-            let newh = en.md5.clone().unwrap_or_default();
-            if fs::symlink_metadata(&fsp).is_err() {
-                rename_new(&newp, &fsp)?;
-            } else {
-                let cur = md5_file(&fsp).unwrap_or_default();
-                if cur == newh {
-                    let _ = fs::remove_file(&newp);
-                } else if old_conf.get(&en.name).map(|s| s.as_str()) == Some(cur.as_str()) {
-                    rename_new(&newp, &fsp)?;
-                } else {
-                    let dist = with_suffix(&fsp, ".dpkg-dist");
-                    let _ = fs::rename(&newp, &dist);
-                    progress::emit(&format!(
-                        "  conffile {} kept (modified locally), new version: {}",
-                        en.name,
-                        dist.display()
-                    ));
+    for (cf, _) in conffiles_of(stanza) {
+        let p = cfg.fs(&cf);
+        let _ = fs::remove_file(&p);
+        if let (Some(dir), Some(base)) = (p.parent(), p.file_name().and_then(|b| b.to_str())) {
+            if let Ok(rd) = fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    let suffix_backup = n
+                        .strip_prefix(base)
+                        .map_or(false, |suf| BACKUP_EXTS.contains(&suf) || is_numbered(suf));
+                    let hash_backup = n.len() >= 2
+                        && n.starts_with('#')
+                        && n.ends_with('#')
+                        && &n[1..n.len() - 1] == base;
+                    if suffix_backup || hash_backup {
+                        let _ = fs::remove_file(e.path());
+                    }
                 }
             }
-            conf_new.push((en.name.clone(), newh));
-        } else {
-            rename_new(&newp, &fsp)?;
         }
-    }
-
-    apply_steals(cfg, &ex.steals);
-    if let Some(o) = old {
-        remove_old_files(cfg, pkg, ex, o, owners);
-        pwarn(run_script(
-            cfg,
-            &pkg.name,
-            &pkg.arch,
-            &info.join(format!("{}.postrm", pkg.name)),
-            "postrm",
-            &["upgrade", &pkg.version],
-        ));
-    }
-    write_info(cfg, pkg, &tmpci, ex)?;
-    let _ = fs::remove_dir_all(&tmpci);
-    *conf = conf_new;
-    *st = St::Unpacked;
-    Ok(())
-}
-
-fn configure_one(cfg: &Cfg, rec: &mut Rec) -> R<()> {
-    rec.st = St::HalfConfigured;
-    let mut args: Vec<&str> = vec!["configure"];
-    if let Some(v) = &rec.old_version {
-        args.push(v.as_str());
     }
     run_script(
         cfg,
-        &rec.pkg.name,
-        &rec.pkg.arch,
-        &cfg.info().join(format!("{}.postinst", rec.pkg.name)),
-        "postinst",
-        &args,
+        name,
+        arch,
+        &cfg.info().join(format!("{name}.postrm")),
+        "postrm",
+        &["purge"],
     )?;
-    rec.st = St::Installed;
-    Ok(())
-}
 
-fn write_journal(cfg: &Cfg, recs: &[Rec]) -> R<()> {
-    let dir = cfg.admin().join("updates");
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut body = String::new();
-    for r in recs {
-        body.push_str(&build_stanza(&r.pkg.ctrl, "install reinstreq half-installed", &[]));
-        body.push('\n');
+    let lp = cfg.info().join(format!("{name}.list"));
+    if let Ok(b) = fs::read(&lp) {
+        let text = String::from_utf8_lossy(&b).into_owned();
+        for l in text.lines().rev() {
+            if l.is_empty() || l == "/." || used_by_others(owners, l, name, removed) {
+                continue;
+            }
+            let _ = fs::remove_dir(cfg.fs(l));
+        }
     }
-    let tmp = dir.join("tmp.i");
-    let dst = dir.join("0000");
-    let mut f = File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
-    drop(f);
-    fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))
-}
-
-fn commit(cfg: &Cfg, db: &mut StatusDb, recs: &[Rec]) -> R<()> {
-    for r in recs {
-        let status = match r.st {
-            St::Pending => continue,
-            St::HalfInstalled => "install reinstreq half-installed",
-            St::Unpacked => "install ok unpacked",
-            St::HalfConfigured => "install ok half-configured",
-            St::Installed => "install ok installed",
-        };
-        db.set(&r.pkg.name, build_stanza(&r.pkg.ctrl, status, &r.conf));
-    }
-    let sp = cfg.admin().join("status");
-    if sp.exists() {
-        let _ = fs::copy(&sp, cfg.admin().join("status-old"));
-    }
-    db.save(&sp)?;
-    for n in update_files(cfg) {
-        let _ = fs::remove_file(cfg.admin().join("updates").join(n));
-    }
-    unsafe {
-        libc::sync();
+    let pre = format!("{name}.");
+    if let Ok(rd) = fs::read_dir(cfg.info()) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if let Some(suf) = n.strip_prefix(pre.as_str()) {
+                if !suf.contains('.') {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn run_transaction(
+fn remove_one(
     cfg: &Cfg,
-    recs: &mut Vec<Rec>,
-    db: &mut StatusDb,
+    name: &str,
+    arch: &str,
+    stanza: &str,
+    purge: bool,
     owners: &HashMap<String, Vec<String>>,
-    tm: &mut Timings,
+    removed: &HashSet<String>,
+    db: &mut StatusDb,
 ) -> R<()> {
-    write_journal(cfg, recs)?;
-    let mut result: R<()> = Ok(());
-    // все затронутые пути (путь, это каталог) — для файловых триггеров
-    let mut touched: Vec<(String, bool)> = Vec::new();
-    let total = recs.len();
-    let t_unpack = Instant::now();
+    let info = cfg.info();
+    let status_path = cfg.admin().join("status");
 
-    for i in 0..total {
-        let name = recs[i].pkg.name.clone();
-        let old = db.get(&name).and_then(|s| old_info(s));
-        recs[i].old_version = old.as_ref().map(|o| o.version.clone());
-        progress::step("Unpack    ", i, total, &name);
+    run_script(
+        cfg,
+        name,
+        arch,
+        &info.join(format!("{name}.prerm")),
+        "prerm",
+        &["remove"],
+    )?;
+    db.set(
+        name,
+        set_status(stanza, "deinstall reinstreq half-installed"),
+    );
+    db.save(&status_path)?;
 
-        let exv = match recs[i].ex.take() {
-            Some(x) => x,
-            None => {
-                result = Err(format!("{name}: internal error, not extracted"));
-                break;
+    let conf: HashSet<String> = conffiles_of(stanza).into_iter().map(|(n, _)| n).collect();
+    let lp = info.join(format!("{name}.list"));
+    let text = fs::read(&lp)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut leftover: Vec<&str> = Vec::new();
+
+    for l in lines.iter().rev() {
+        let l = *l;
+        if l.is_empty() || l == "/." || conf.contains(l) {
+            if !l.is_empty() {
+                leftover.push(l);
             }
-        };
-        for en in &exv.entries {
-            touched.push((en.name.clone(), en.kind == Kind::Dir));
+            continue;
         }
-        let r = {
-            let rec = &mut recs[i];
-            unpack_inner(cfg, &rec.pkg, &exv, old.as_ref(), owners, &mut rec.st, &mut rec.conf)
+        let fsp = cfg.fs(l);
+        let md = match fs::symlink_metadata(&fsp) {
+            Ok(m) => m,
+            Err(_) => continue,
         };
-        if let Err(e) = r {
-            cleanup_new(&exv);
-            result = Err(format!("{name}: {e}"));
-            break;
-        }
-    }
-    tm.unpack = t_unpack.elapsed();
-    progress::clear_line();
-
-    if result.is_ok() {
-        let t_conf = Instant::now();
-        let todo: Vec<usize> = (0..total).filter(|&i| recs[i].st == St::Unpacked).collect();
-        let nt = todo.len();
-        for (k, &i) in todo.iter().enumerate() {
-            let name = recs[i].pkg.name.clone();
-            progress::step("Configure ", k, nt, &name);
-            if let Err(e) = configure_one(cfg, &mut recs[i]) {
-                result = Err(format!("{name}: {e}"));
-                break;
+        if md.is_dir() {
+            if used_by_others(owners, l, name, removed) {
+                continue;
+            }
+            if fs::remove_dir(&fsp).is_err() {
+                leftover.push(l);
+            }
+        } else {
+            let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-tmp"));
+            let _ = fs::remove_file(with_suffix(&fsp, ".dpkg-new"));
+            if let Err(e) = fs::remove_file(&fsp) {
+                progress::emit(&format!(
+                    "{} cannot remove {}: {e}",
+                    paint("33", "warning:"),
+                    fsp.display()
+                ));
             }
         }
-        tm.configure = t_conf.elapsed();
-        progress::clear_line();
     }
+    leftover.reverse();
+    let mut s = leftover.join("\n");
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    write_atomic(&lp, s.as_bytes())?;
 
-    for rec in recs.iter_mut() {
-        if let Some(ex) = rec.ex.take() {
-            cleanup_new(&ex);
+    run_script(
+        cfg,
+        name,
+        arch,
+        &info.join(format!("{name}.postrm")),
+        "postrm",
+        &["remove"],
+    )?;
+
+    let has_postrm = info.join(format!("{name}.postrm")).exists();
+    let pre = format!("{name}.");
+    if let Ok(rd) = fs::read_dir(&info) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if let Some(suf) = n.strip_prefix(pre.as_str()) {
+                if !suf.contains('.') && suf != "list" && suf != "postrm" {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
         }
     }
-    let c = commit(cfg, db, recs);
 
-    if result.is_ok() && c.is_ok() && cfg.scripts_enabled() && !NO_TRIGGERS.load(Ordering::Relaxed) {
-        let configured: HashSet<String> = recs
-            .iter()
-            .filter(|r| r.st == St::Installed)
-            .map(|r| r.pkg.name.clone())
-            .collect();
-        let t = Instant::now();
-        triggers::run(cfg, db, &configured, &touched);
-        tm.triggers = t.elapsed();
+    if purge || (!has_postrm && conf.is_empty()) {
+        purge_one(cfg, name, arch, stanza, owners, removed)?;
+        db.remove(name);
+    } else {
+        db.set(name, set_status(stanza, "deinstall ok config-files"));
     }
-    result.and(c)
+    db.save(&status_path)
 }
 
-// ------------------------------------------------------------ deps check for local .deb
-
-fn missing_deps(inst: &HashMap<String, Entry>, planned: &HashSet<String>, ctrl: &Control) -> Vec<String> {
-    let mut miss = Vec::new();
-    for key in ["Pre-Depends", "Depends"] {
-        let Some(v) = ctrl.get(key) else { continue };
-        for group in parse_dep_list(v) {
-            let ok = group.iter().any(|d| {
-                planned.contains(&d.name)
-                    || inst.get(&d.name).map_or(false, |e| resolve::dep_ok(d, &e.version))
-                    || inst.values().any(|e| e.provides.iter().any(|(pn, _)| *pn == d.name))
-            });
-            if !ok {
-                miss.push(resolve::fmt_group(&group));
-            }
-        }
-    }
-    miss
-}
-
-// ------------------------------------------------------------ driver
-
-pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgrade_all: bool) -> R<i32> {
-    let need_index = upgrade_all || !reqs.is_empty();
-    let idx: Option<Index> =
-        if need_index { Some(Index::load(Path::new(&cfg.prefix), &arch())?) } else { None };
+pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<i32> {
     let _lock = lock_db(cfg)?;
     let mut db = StatusDb::load(&cfg.admin().join("status"))?;
     incorporate_updates(cfg, &mut db)?;
     let inst = db.installed();
+    let mut marks = Marks::load(cfg);
 
-    // локальные .deb
-    let mut local_pkgs: Vec<Pkg> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let my_arch = arch();
-    for p in &locals {
-        let pkg = prepare(p)?;
-        if !arch_ok(&pkg.arch, &my_arch) {
+    let mut targets: Vec<String> = Vec::new();
+    let mut cfg_only: Vec<String> = Vec::new();
+    for n in names {
+        if inst.contains_key(n) {
+            targets.push(n.clone());
+        } else if purge && db.status_of(n).as_deref() == Some("config-files") {
+            cfg_only.push(n.clone());
+        } else {
+            eprintln!("{} {} is not installed", paint("33", "akg:"), n);
+        }
+    }
+    if targets.is_empty() && cfg_only.is_empty() && !autorem {
+        return Ok(1);
+    }
+
+    let mut set: Vec<String> = if targets.is_empty() {
+        Vec::new()
+    } else {
+        resolve::removal_closure(&inst, &targets)
+    };
+    if autorem {
+        let rest: HashMap<String, _> = inst
+            .iter()
+            .filter(|(n, _)| !set.contains(n))
+            .map(|(n, e)| (n.clone(), e.clone()))
+            .collect();
+        let extra = resolve::autoremove_set(&rest, &marks.autos());
+        set.extend(extra);
+        set.sort();
+        set.dedup();
+    }
+    for n in &set {
+        if inst.get(n).map_or(false, |e| e.essential) {
             return Err(format!(
-                "{}: architecture '{}' does not match this device ('{}')",
-                pkg.name, pkg.arch, my_arch
+                "{n} is an essential package, refusing to remove it"
             ));
         }
-        if !seen.insert(pkg.name.clone()) {
-            continue;
-        }
-        local_pkgs.push(pkg);
     }
-    let local_names: HashSet<String> = local_pkgs.iter().map(|p| p.name.clone()).collect();
-
-    let mut explicit: HashSet<String> =
-        if upgrade_all { HashSet::new() } else { reqs.iter().map(|r| r.name.clone()).collect() };
-    explicit.extend(local_names.iter().cloned());
-
-    // пакеты из репозитория
-    let mut entries: Vec<Entry> = Vec::new();
-    if let Some(idx) = &idx {
-        if upgrade_all {
-            reqs = resolve::upgrade_requests(idx, &inst);
-        }
-        if !reqs.is_empty() {
-            let plan = resolve::plan_install(idx, &inst, &reqs)?;
-            if !plan.remove.is_empty() {
-                return Err(format!(
-                    "these installed packages conflict and must be removed first: {} (akg uninstall ...)",
-                    plan.remove.join(", ")
-                ));
-            }
-            entries = plan.install;
-        }
-    }
-    entries.retain(|e| !local_names.contains(&e.name));
-
-    if entries.is_empty() && local_pkgs.is_empty() {
-        println!("Nothing to do.");
+    if set.is_empty() && cfg_only.is_empty() {
+        println!("Nothing to remove.");
         return Ok(0);
     }
 
-    let n = entries.len();
-    let archives = cfg.archives();
-    fs::create_dir_all(&archives).map_err(|e| format!("{}: {e}", archives.display()))?;
-
-    println!("{} package(s):", n + local_pkgs.len());
-    for e in &entries {
-        let tag = if inst.contains_key(&e.name) { "upgrade" } else { "new" };
-        println!("  {} {} [{}]", paint("1;32", &e.name), e.vstr, tag);
-    }
-    for p in &local_pkgs {
-        let tag = if inst.contains_key(&p.name) { "upgrade" } else { "new" };
-        println!("  {} {} [{}, local]", paint("1;32", &p.name), p.version, tag);
-    }
-
-    let planned: HashSet<String> =
-        entries.iter().map(|e| e.name.clone()).chain(local_names.iter().cloned()).collect();
-    for p in &local_pkgs {
-        let miss = missing_deps(&inst, &planned, &p.ctrl);
-        if !miss.is_empty() {
-            eprintln!(
-                "{} {} has unmet dependencies: {}",
-                paint("33", "warning:"),
-                p.name,
-                miss.join(", ")
-            );
-        }
-    }
-
-    let total: u64 = entries.iter().map(|e| e.size).sum();
-    if total > 0 {
-        println!("Need to download {}", fmt_bytes(total as f64));
+    println!("To {}:", if purge { "purge" } else { "remove" });
+    for n in set.iter().chain(cfg_only.iter()) {
+        let why = if targets.contains(n) || cfg_only.contains(n) {
+            ""
+        } else {
+            "  (unused dependency/dependent)"
+        };
+        println!("  {}{}", paint("1;31", n), why);
     }
     if cfg.dry_run {
         return Ok(0);
@@ -622,237 +276,91 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
         return Ok(1);
     }
 
-    let dl_only = DOWNLOAD_ONLY.load(Ordering::Relaxed);
-    let owners = Arc::new(load_owners(cfg));
+    let owners = load_owners(cfg);
+    let mut removed: HashSet<String> = HashSet::new();
+    let order = resolve::removal_order(&inst, &set);
+    let mut result: R<()> = Ok(());
+
     let t0 = Instant::now();
-    let mut tm = Timings::default();
+    let mut t_remove = Duration::ZERO;
+    let mut t_purge = Duration::ZERO;
 
-    // общий счётчик прогресса для бара загрузки/распаковки
-    let local_sizes: Vec<u64> =
-        local_pkgs.iter().map(|p| fs::metadata(&p.path).map(|m| m.len()).unwrap_or(0)).collect();
-    let ex_total: u64 = total + local_sizes.iter().sum::<u64>();
-    let sh = Shared::new(n, if dl_only { 0 } else { n + local_pkgs.len() }, total, ex_total);
-    let mut rend = Renderer::start(sh.clone());
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let results: Vec<Result<Option<(Pkg, Extracted)>, String>> = rt.block_on(async {
-        let sem = Arc::new(Semaphore::new(cfg.jobs.max(2)));
-        let mut handles = Vec::with_capacity(n);
-
-        for e in entries {
-            let archives = archives.clone();
-            let owners = owners.clone();
-            let cfg_root = cfg.root.clone();
-            let cfg_prefix = cfg.prefix.clone();
-            let force = cfg.force_overwrite;
-            let dl = dl_only;
-            let sem = sem.clone();
-            let sh = sh.clone();
-
-            let h = tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("sem closed");
-
-                let fname = e.filename.rsplit('/').next().unwrap_or("").to_string();
-                if fname.is_empty() || fname == "." || fname == ".." {
-                    return Err(format!("{}: bad filename in package index", e.name));
+    // фаза Remove (remove_one; внутри может быть purge, если --purge)
+    if !order.is_empty() {
+        let t = Instant::now();
+        let total = order.len();
+        let label = if purge { "Purge     " } else { "Remove    " };
+        for (i, n) in order.iter().enumerate() {
+            let stanza = match db.get(n) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            let arch = inst.get(n).map(|e| e.arch.clone()).unwrap_or_default();
+            progress::step(label, i, total, n);
+            match remove_one(cfg, n, &arch, &stanza, purge, &owners, &removed, &mut db) {
+                Ok(()) => {
+                    removed.insert(n.clone());
+                    marks.remove(n);
                 }
-                // без хеша в индексе пакет не ставим
-                let Some(want) = e.sha256.clone() else {
-                    return Err(format!("{}: no SHA256 in package index, refusing to install", e.name));
-                };
-                let dst = archives.join(&fname);
-
-                // кэш годится только при совпадении размера И sha256
-                if cache_valid(&dst, e.size, &want) {
-                    sh.dl_bytes.fetch_add(e.size, Ordering::Relaxed);
-                } else {
-                    let _ = fs::remove_file(&dst);
-                    let job = Job {
-                        url: format!("{}/{}", e.uri.trim_end_matches('/'), e.filename),
-                        dest: dst.clone(),
-                        size: e.size,
-                        sha256: Some(want.clone()),
-                    };
-                    for attempt in 0..3u64 {
-                        match net::download_one(&job, sh.dl_bytes.clone()).await {
-                            Ok(()) => break,
-                            Err(err) if attempt == 2 => {
-                                return Err(format!("{}: {err}", e.name));
-                            }
-                            Err(_) => {
-                                tokio::time::sleep(std::time::Duration::from_millis(300 + attempt * 200)).await;
-                            }
-                        }
-                    }
-                }
-                sh.dl_done.fetch_add(1, Ordering::Relaxed);
-
-                if dl {
-                    return Ok(None);
-                }
-
-                let cfg_local = Cfg {
-                    root: cfg_root,
-                    prefix: cfg_prefix,
-                    jobs: 1,
-                    yes: true,
-                    dry_run: false,
-                    force_overwrite: force,
-                    no_scripts: true,
-                };
-                let pkg = prepare(&dst).map_err(|err| format!("{}: {err}", e.name))?;
-                let ex = extract_data(&cfg_local, &pkg, &owners)
-                    .map_err(|err| format!("{}: {err}", e.name))?;
-                sh.ex_bytes.fetch_add(e.size, Ordering::Relaxed);
-                sh.ex_done.fetch_add(1, Ordering::Relaxed);
-                Ok(Some((pkg, ex)))
-            });
-            handles.push(h);
-        }
-
-        let mut out = Vec::with_capacity(handles.len());
-        for h in handles {
-            match h.await {
-                Ok(r) => out.push(r),
-                Err(e) => out.push(Err(format!("task join: {e}"))),
-            }
-        }
-        out
-    });
-
-    let mut pkgs: Vec<(Pkg, Extracted)> = Vec::new();
-    let mut first_err: Option<String> = None;
-    for r in results {
-        match r {
-            Ok(Some(px)) => pkgs.push(px),
-            Ok(None) => {}
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
+                Err(e) => {
+                    result = Err(format!("{n}: {e}"));
+                    break;
                 }
             }
         }
-    }
-    if let Some(e) = first_err {
-        rend.finish();
-        for (_, x) in &pkgs {
-            cleanup_new(x);
-        }
-        return Err(e);
+        t_remove = t.elapsed();
+        progress::clear_line();
     }
 
-    if dl_only {
-        rend.finish();
-        println!(
-            "{} downloaded {} package(s) to {} in {}",
-            paint("1;32", "akg:"),
-            n,
-            archives.display(),
-            progress::fmt_dur(t0.elapsed())
-        );
-        return Ok(0);
-    }
-
-    // локальные .deb распаковываем здесь (сеть не нужна)
-    for (i, pkg) in local_pkgs.into_iter().enumerate() {
-        match extract_data(cfg, &pkg, &owners) {
-            Ok(ex) => {
-                sh.ex_bytes.fetch_add(local_sizes[i], Ordering::Relaxed);
-                sh.ex_done.fetch_add(1, Ordering::Relaxed);
-                pkgs.push((pkg, ex));
+    // фаза Purge для config-files only
+    if result.is_ok() && !cfg_only.is_empty() {
+        let t = Instant::now();
+        let total = cfg_only.len();
+        for (i, n) in cfg_only.iter().enumerate() {
+            let stanza = match db.get(n) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            let arch = field(&stanza, "Architecture").unwrap_or_default();
+            progress::step("Purge     ", i, total, n);
+            if let Err(e) = purge_one(cfg, n, &arch, &stanza, &owners, &removed) {
+                result = Err(format!("{n}: {e}"));
+                break;
             }
-            Err(e) => {
-                rend.finish();
-                for (_, x) in &pkgs {
-                    cleanup_new(x);
-                }
-                return Err(e);
-            }
+            db.remove(n);
+            marks.remove(n);
+            removed.insert(n.clone());
         }
+        t_purge = t.elapsed();
+        progress::clear_line();
+        warn(db.save(&cfg.admin().join("status")));
+    } else if result.is_ok() {
+        warn(db.save(&cfg.admin().join("status")));
     }
-    rend.finish();
-    tm.fetch = t0.elapsed();
 
-    let mut recs: Vec<Rec> = pkgs
-        .into_iter()
-        .map(|(pkg, ex)| Rec {
-            pkg,
-            ex: Some(ex),
-            st: St::Pending,
-            conf: Vec::new(),
-            old_version: None,
-        })
-        .collect();
-
-    let res = run_transaction(cfg, &mut recs, &mut db, &owners, &mut tm);
-
-    let mut marks = Marks::load(cfg);
-    for r in &recs {
-        if r.st != St::Installed {
-            continue;
-        }
-        let nm = &r.pkg.name;
-        if explicit.contains(nm) {
-            marks.set(nm, &r.pkg.arch, false);
-        } else if !inst.contains_key(nm) {
-            marks.set(nm, &r.pkg.arch, true);
-        }
-    }
-    pwarn(marks.save(cfg));
-
-    res?;
+    warn(marks.save(cfg));
+    result?;
 
     progress::clear_line();
     println!(
         "{} {} package(s) processed in {}",
         paint("1;32", "akg:"),
-        recs.len(),
+        removed.len(),
         progress::fmt_dur(t0.elapsed())
     );
-    let mut parts = vec![
-        format!("fetch {}", progress::fmt_dur(tm.fetch)),
-        format!("unpack {}", progress::fmt_dur(tm.unpack)),
-        format!("configure {}", progress::fmt_dur(tm.configure)),
-    ];
-    if tm.triggers > Duration::ZERO {
-        parts.push(format!("triggers {}", progress::fmt_dur(tm.triggers)));
+    let mut parts = Vec::new();
+    if t_remove > Duration::ZERO {
+        parts.push(format!(
+            "{} {}",
+            if purge { "purge" } else { "remove" },
+            progress::fmt_dur(t_remove)
+        ));
     }
-    println!("     {}", parts.join(" · "));
+    if t_purge > Duration::ZERO {
+        parts.push(format!("purge {}", progress::fmt_dur(t_purge)));
+    }
+    if !parts.is_empty() {
+        println!("     {}", parts.join(" · "));
+    }
     Ok(0)
-}
-
-// ------------------------------------------------------------ tests
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn arch_rules() {
-        assert!(arch_ok("all", "aarch64"));
-        assert!(arch_ok("aarch64", "aarch64"));
-        assert!(!arch_ok("arm", "aarch64"));
-        assert!(!arch_ok("x86_64", "aarch64"));
-        assert!(!arch_ok("", "aarch64"));
-    }
-
-    #[test]
-    fn cache_needs_matching_size_and_hash() {
-        let p = std::env::temp_dir().join(format!("akg-cache-{}", std::process::id()));
-        fs::write(&p, b"hello").unwrap();
-        let good = hex(Sha256::digest(b"hello").as_slice());
-        assert!(cache_valid(&p, 5, &good));
-        assert!(cache_valid(&p, 0, &good));
-        assert!(!cache_valid(&p, 5, &"0".repeat(64)));
-        assert!(!cache_valid(&p, 6, &good));
-        // подмена содержимого при том же размере
-        fs::write(&p, b"HELLO").unwrap();
-        assert!(!cache_valid(&p, 5, &good));
-        let _ = fs::remove_file(&p);
-        assert!(!cache_valid(&p, 5, &good));
-    }
 }
