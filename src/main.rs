@@ -2,6 +2,7 @@
 
 mod db;
 mod deb;
+mod excache;
 mod install;
 mod net;
 mod progress;
@@ -385,6 +386,10 @@ fn run() -> R<i32> {
             if let Ok(rd) = fs::read_dir(cfg.archives()) {
                 for e in rd.flatten() {
                     let p = e.path();
+                    if p.extension().map_or(false, |x| x == "extracted") {
+                        excache::drop_cache(&p);
+                        continue;
+                    }
                     if p.extension().map_or(false, |x| x == "deb") {
                         bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
                         if fs::remove_file(&p).is_ok() {

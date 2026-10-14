@@ -2,6 +2,9 @@
 // двумя барами, пока работают параллельные задачи; стадии установки (Install/Configure/
 // Trigger) — одним баром на стадию. Вывод скриптов идёт через emit() и печатается над баром.
 // Если stderr не терминал, ничего не рисуется (печатаются обычные строки).
+//
+// Download считается по байтам (1.2 MiB/918 MiB), Extract и стадии — по количеству (3/12).
+// Как только бар завершён, он замораживается: скорость и ETA больше не считаются.
 
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -9,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 pub fn is_tty() -> bool {
     static TTY: OnceLock<bool> = OnceLock::new();
@@ -54,18 +57,35 @@ fn mk_style(tpl: &str) -> ProgressStyle {
         .progress_chars("━╸━")
 }
 
-fn dl_style(narrow: bool) -> ProgressStyle {
-    if narrow {
-        mk_style("{prefix:<10} {wide_bar:.green/238} {percent:>3}% {bytes_per_sec}")
-    } else {
+// Download: всегда байты "скачано/всего". Чем шире экран, тем больше деталей.
+fn dl_style(w: usize) -> ProgressStyle {
+    if w >= 90 {
         mk_style(
-            "{prefix:<10} {wide_bar:.green/238} {bytes}/{total_bytes} {bytes_per_sec} eta {eta_precise} {msg}",
+            "{prefix:<10} {wide_bar:.green/238} {bytes}/{total_bytes} {bytes_per_sec} eta {eta} {msg}",
         )
+    } else if w >= 62 {
+        mk_style("{prefix:<10} {wide_bar:.green/238} {bytes}/{total_bytes} {bytes_per_sec}")
+    } else {
+        mk_style("{prefix:<9} {wide_bar:.green/238} {bytes}/{total_bytes}")
     }
 }
 
-fn ex_style() -> ProgressStyle {
-    mk_style("{prefix:<10} {wide_bar:.cyan/238} {msg}")
+// Download завершён: без скорости и ETA (они не обновляются), только итог.
+fn dl_done_style(w: usize) -> ProgressStyle {
+    if w >= 62 {
+        mk_style("{prefix:<10} {wide_bar:.green/238} {bytes}/{total_bytes} {msg}")
+    } else {
+        mk_style("{prefix:<9} {wide_bar:.green/238} {bytes}/{total_bytes}")
+    }
+}
+
+// Extract: по количеству пакетов, 1/12, 2/12 ...
+fn ex_style(w: usize) -> ProgressStyle {
+    if w >= 62 {
+        mk_style("{prefix:<10} {wide_bar:.cyan/238} {pos}/{len} packages")
+    } else {
+        mk_style("{prefix:<9} {wide_bar:.cyan/238} {pos}/{len}")
+    }
 }
 
 fn step_style(narrow: bool) -> ProgressStyle {
@@ -194,6 +214,18 @@ impl Shared {
     }
 }
 
+// Заморозить бар загрузки: полный бар, без скорости/ETA, в конце — средняя скорость и время.
+fn freeze_download(pb: &ProgressBar, total: u64, t0: Instant, w: usize) {
+    let secs = t0.elapsed().as_secs_f64();
+    pb.set_style(dl_done_style(w));
+    pb.set_position(total.max(1));
+    if w >= 62 {
+        let avg = if secs > 0.0 { (total as f64 / secs) as u64 } else { total };
+        pb.set_message(format!("avg {}/s in {}", HumanBytes(avg), fmt_secs(secs)));
+    }
+    pb.finish();
+}
+
 pub struct Renderer {
     sh: Arc<Shared>,
     handle: Option<JoinHandle<()>>,
@@ -207,66 +239,66 @@ impl Renderer {
         let s = sh.clone();
         let handle = thread::spawn(move || {
             let mp = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(10));
-            let narrow = width() < 70;
+            let w = width();
+            let t0 = Instant::now();
 
             let dl = if s.dl_pkgs > 0 {
                 let pb = mp.add(ProgressBar::new(s.dl_total.max(1)));
-                pb.set_style(dl_style(narrow));
+                pb.set_style(dl_style(w));
                 pb.set_prefix("Download");
                 Some(pb)
             } else {
                 None
             };
             let ex = if s.ex_pkgs > 0 {
-                let pb = mp.add(ProgressBar::new(s.ex_total.max(1)));
-                pb.set_style(ex_style());
+                // длина = число пакетов, а не байты
+                let pb = mp.add(ProgressBar::new(s.ex_pkgs as u64));
+                pb.set_style(ex_style(w));
                 pb.set_prefix("Extract");
                 Some(pb)
             } else {
                 None
             };
 
+            let mut dl_fin = false;
+            let mut ex_fin = false;
+
             loop {
                 let stopping = s.stop.load(Ordering::Relaxed);
 
-                let mut dl_ok = true;
                 if let Some(pb) = &dl {
-                    let done = s.dl_done.load(Ordering::Relaxed).min(s.dl_pkgs);
-                    dl_ok = done >= s.dl_pkgs;
-                    let pos = if dl_ok {
-                        s.dl_total.max(1)
-                    } else {
-                        s.dl_bytes.load(Ordering::Relaxed).min(s.dl_total)
-                    };
-                    pb.set_position(pos);
-                    pb.set_message(format!("{}/{}", done, s.dl_pkgs));
+                    if !dl_fin {
+                        let done = s.dl_done.load(Ordering::Relaxed).min(s.dl_pkgs);
+                        if done >= s.dl_pkgs {
+                            // всё скачано: замораживаем сразу, не ждём конца распаковки
+                            freeze_download(pb, s.dl_total, t0, w);
+                            dl_fin = true;
+                        } else {
+                            pb.set_position(s.dl_bytes.load(Ordering::Relaxed).min(s.dl_total));
+                            pb.set_message(format!("{}/{}", done, s.dl_pkgs));
+                        }
+                    }
                 }
 
-                let mut ex_ok = true;
                 if let Some(pb) = &ex {
-                    let done = s.ex_done.load(Ordering::Relaxed).min(s.ex_pkgs);
-                    ex_ok = done >= s.ex_pkgs;
-                    let pos = if ex_ok {
-                        s.ex_total.max(1)
-                    } else {
-                        s.ex_bytes.load(Ordering::Relaxed).min(s.ex_total)
-                    };
-                    pb.set_position(pos);
-                    pb.set_message(format!("{}/{} packages", done, s.ex_pkgs));
+                    if !ex_fin {
+                        let done = s.ex_done.load(Ordering::Relaxed).min(s.ex_pkgs);
+                        pb.set_position(done as u64);
+                        if done >= s.ex_pkgs {
+                            pb.finish();
+                            ex_fin = true;
+                        }
+                    }
                 }
 
                 if stopping {
                     if let Some(pb) = &dl {
-                        if dl_ok {
-                            pb.finish();
-                        } else {
+                        if !dl_fin {
                             pb.abandon();
                         }
                     }
                     if let Some(pb) = &ex {
-                        if ex_ok {
-                            pb.finish();
-                        } else {
+                        if !ex_fin {
                             pb.abandon();
                         }
                     }

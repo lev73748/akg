@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 
 use crate::db::*;
 use crate::deb::*;
+use crate::excache;
 use crate::net::{self, Job};
 use crate::progress::{self, Renderer, Shared};
 use crate::repo::{parse_dep_list, Entry, Index};
@@ -524,6 +525,30 @@ fn missing_deps(inst: &HashMap<String, Entry>, planned: &HashSet<String>, ctrl: 
     miss
 }
 
+// Какие пакеты уже лежат в кэше целиком (совпали размер и sha256). Проверяем параллельно.
+fn scan_cache(entries: &[Entry], archives: &Path, jobs: usize) -> HashSet<String> {
+    let found: std::sync::Mutex<HashSet<String>> = std::sync::Mutex::new(HashSet::new());
+    let next = AtomicUsize::new(0);
+    let workers = jobs.clamp(1, 8).min(entries.len().max(1));
+    thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(e) = entries.get(i) else { break };
+                let fname = e.filename.rsplit('/').next().unwrap_or("");
+                if fname.is_empty() || fname == "." || fname == ".." {
+                    continue;
+                }
+                let Some(want) = e.sha256.as_deref() else { continue };
+                if cache_valid(&archives.join(fname), e.size, want) {
+                    found.lock().unwrap_or_else(|x| x.into_inner()).insert(e.name.clone());
+                }
+            });
+        }
+    });
+    found.into_inner().unwrap_or_else(|x| x.into_inner())
+}
+
 // ------------------------------------------------------------ driver
 
 pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgrade_all: bool) -> R<i32> {
@@ -610,9 +635,15 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
         }
     }
 
-    let total: u64 = entries.iter().map(|e| e.size).sum();
+    // то, что уже скачано и проверено, не качаем и в загрузку не считаем
+    let cached: Arc<HashSet<String>> = Arc::new(scan_cache(&entries, &archives, cfg.jobs));
+    let n_fetch = entries.iter().filter(|e| !cached.contains(&e.name)).count();
+    let total: u64 = entries.iter().filter(|e| !cached.contains(&e.name)).map(|e| e.size).sum();
     if total > 0 {
         println!("Need to download {}", fmt_bytes(total as f64));
+    }
+    if !cached.is_empty() {
+        println!("{} package(s) already in cache", cached.len());
     }
     if cfg.dry_run {
         return Ok(0);
@@ -631,7 +662,7 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
     let local_sizes: Vec<u64> =
         local_pkgs.iter().map(|p| fs::metadata(&p.path).map(|m| m.len()).unwrap_or(0)).collect();
     let ex_total: u64 = total + local_sizes.iter().sum::<u64>();
-    let sh = Shared::new(n, if dl_only { 0 } else { n + local_pkgs.len() }, total, ex_total);
+    let sh = Shared::new(n_fetch, if dl_only { 0 } else { n + local_pkgs.len() }, total, ex_total);
     let mut rend = Renderer::start(sh.clone());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -652,6 +683,7 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
             let dl = dl_only;
             let sem = sem.clone();
             let sh = sh.clone();
+            let cached = cached.clone();
 
             let h = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("sem closed");
@@ -666,10 +698,8 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
                 };
                 let dst = archives.join(&fname);
 
-                // кэш годится только при совпадении размера И sha256
-                if cache_valid(&dst, e.size, &want) {
-                    sh.dl_bytes.fetch_add(e.size, Ordering::Relaxed);
-                } else {
+                // кэш уже проверен до старта (размер И sha256): такие пакеты не качаем
+                if !cached.contains(&e.name) {
                     let _ = fs::remove_file(&dst);
                     let job = Job {
                         url: format!("{}/{}", e.uri.trim_end_matches('/'), e.filename),
@@ -688,8 +718,8 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
                             }
                         }
                     }
+                    sh.dl_done.fetch_add(1, Ordering::Relaxed);
                 }
-                sh.dl_done.fetch_add(1, Ordering::Relaxed);
 
                 if dl {
                     return Ok(None);
@@ -705,7 +735,7 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
                     no_scripts: true,
                 };
                 let pkg = prepare(&dst).map_err(|err| format!("{}: {err}", e.name))?;
-                let ex = extract_data(&cfg_local, &pkg, &owners)
+                let ex = excache::extract_cached(&cfg_local, &pkg, &owners, &want)
                     .map_err(|err| format!("{}: {err}", e.name))?;
                 sh.ex_bytes.fetch_add(e.size, Ordering::Relaxed);
                 sh.ex_done.fetch_add(1, Ordering::Relaxed);
@@ -750,7 +780,7 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
         println!(
             "{} downloaded {} package(s) to {} in {}",
             paint("1;32", "akg:"),
-            n,
+            n_fetch,
             archives.display(),
             progress::fmt_dur(t0.elapsed())
         );
@@ -789,6 +819,13 @@ pub fn run_install(cfg: &Cfg, mut reqs: Vec<Request>, locals: Vec<PathBuf>, upgr
         .collect();
 
     let res = run_transaction(cfg, &mut recs, &mut db, &owners, &mut tm);
+
+    // установленные пакеты больше не нужны в кэше распаковки
+    for r in &recs {
+        if r.st == St::Installed && r.pkg.path.starts_with(&archives) {
+            let _ = fs::remove_file(excache::manifest_path(&r.pkg.path));
+        }
+    }
 
     let mut marks = Marks::load(cfg);
     for r in &recs {
