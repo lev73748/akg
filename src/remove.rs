@@ -363,3 +363,4 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     if !parts.is_empty() {
         println!("     {}", parts.join(" · "));
     }
+}
