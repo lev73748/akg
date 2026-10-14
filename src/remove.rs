@@ -1,10 +1,10 @@
+// src/remove.rs
 // Удаление по логике dpkg remove.c: prerm, файлы в обратном порядке, postrm,
 // config-files, purge. Плюс autoremove по меткам auto-installed.
 // Прогресс и тайминги — как в install.rs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::db::*;
@@ -15,7 +15,7 @@ use crate::resolve;
 use crate::util::*;
 
 const BACKUP_EXTS: &[&str] = &[
-    "\~",
+    "~",
     ".bak",
     "%",
     ".dpkg-tmp",
@@ -27,8 +27,8 @@ const BACKUP_EXTS: &[&str] = &[
 
 fn is_numbered(suf: &str) -> bool {
     suf.len() > 2
-        && suf.starts_with('\~')
-        && suf.ends_with('\~')
+        && suf.starts_with('~')
+        && suf.ends_with('~')
         && suf[1..suf.len() - 1].bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -340,9 +340,6 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     }
 
     warn(marks.save(cfg));
-    for p in ["usr/share"] {
-        let _ = Path::new(p);
-    }
     result?;
 
     progress::clear_line();
@@ -366,5 +363,3 @@ pub fn run_remove(cfg: &Cfg, names: &[String], purge: bool, autorem: bool) -> R<
     if !parts.is_empty() {
         println!("     {}", parts.join(" · "));
     }
-    Ok(0)
-}
