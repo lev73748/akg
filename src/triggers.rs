@@ -5,6 +5,7 @@ use std::fs;
 
 use crate::db::{field, Cfg, StatusDb};
 use crate::install::run_script;
+use crate::progress;
 use crate::util::*;
 
 #[derive(Default)]
@@ -48,18 +49,12 @@ fn hit(touched: &[(String, bool)], target: &str) -> bool {
 }
 
 pub fn run(cfg: &Cfg, db: &StatusDb, configured: &HashSet<String>, touched: &[(String, bool)]) {
-    let Ok(rd) = fs::read_dir(cfg.info()) else {
-        return;
-    };
+    let Ok(rd) = fs::read_dir(cfg.info()) else { return };
     let mut specs: BTreeMap<String, Spec> = BTreeMap::new();
     for e in rd.flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
-        let Some(pkg) = n.strip_suffix(".triggers") else {
-            continue;
-        };
-        let Ok(text) = fs::read_to_string(e.path()) else {
-            continue;
-        };
+        let Some(pkg) = n.strip_suffix(".triggers") else { continue };
+        let Ok(text) = fs::read_to_string(e.path()) else { continue };
         specs.insert(pkg.to_string(), parse(&text));
     }
     if specs.is_empty() {
@@ -82,35 +77,28 @@ pub fn run(cfg: &Cfg, db: &StatusDb, configured: &HashSet<String>, touched: &[(S
             continue;
         }
         for t in &s.interests {
-            let fire = if t.starts_with('/') {
-                hit(touched, t)
-            } else {
-                named.contains(t.as_str())
-            };
+            let fire = if t.starts_with('/') { hit(touched, t) } else { named.contains(t.as_str()) };
             if fire {
                 pending.entry(pkg.clone()).or_default().insert(t.clone());
             }
         }
     }
 
-    for (pkg, names) in &pending {
+    // только пакеты, у которых есть postinst
+    let todo: Vec<(&String, &BTreeSet<String>)> = pending
+        .iter()
+        .filter(|(pkg, _)| cfg.info().join(format!("{pkg}.postinst")).exists())
+        .collect();
+    let total = todo.len();
+
+    for (k, (pkg, names)) in todo.iter().enumerate() {
+        progress::step("Trigger   ", k, total, pkg);
         let script = cfg.info().join(format!("{pkg}.postinst"));
-        if !script.exists() {
-            continue;
-        }
-        let arch = db
-            .get(pkg)
-            .and_then(|s| field(s, "Architecture"))
-            .unwrap_or_default();
+        let arch = db.get(pkg).and_then(|s| field(s, "Architecture")).unwrap_or_default();
         let list = names.iter().cloned().collect::<Vec<_>>().join(" ");
-        println!("  {} {} ({})", paint("36", "trigger"), pkg, list);
-        warn(run_script(
-            cfg,
-            pkg,
-            &arch,
-            &script,
-            "postinst",
-            &["triggered", list.as_str()],
-        ));
+        if let Err(e) = run_script(cfg, pkg, &arch, &script, "postinst", &["triggered", list.as_str()]) {
+            progress::emit(&format!("{} {}", paint("33", "warning:"), e));
+        }
     }
+    progress::clear_line();
 }

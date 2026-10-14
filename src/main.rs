@@ -4,6 +4,7 @@ mod db;
 mod deb;
 mod install;
 mod net;
+mod progress;
 mod remove;
 mod repo;
 mod resolve;
