@@ -1,7 +1,7 @@
 
 [package]
 name = "akg"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 description = "Fast package manager for Termux"
 license = "MIT"
