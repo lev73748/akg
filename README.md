@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)](https://termux.dev/)
-[![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](https://github.com/lev73748/akg)
+[![Version](https://img.shields.io/badge/version-0.5.5-blue.svg)](https://github.com/lev73748/akg)
 
 Fast package manager for Termux written in Rust.  
 Compatible with the apt/dpkg package format and repository layout.
