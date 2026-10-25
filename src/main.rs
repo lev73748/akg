@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod bench;
 mod db;
 mod deb;
 mod excache;
@@ -8,6 +9,7 @@ mod net;
 mod progress;
 mod remove;
 mod repo;
+mod reposet;
 mod resolve;
 mod triggers;
 mod util;
@@ -59,6 +61,9 @@ fn help() {
   files <pkg>           files of installed package       [f]
   list-installed        installed packages
   clean                 delete cached .deb files
+  bench                 test mirrors (ping, speed) and choose the default
+  add-repo <links|file> add repositories (main, root, x11 ...), signature checked
+  repo-choice           choose the default repository from a list
 
 Test mode: AKG_ROOT=$HOME/fakeroot akg install -y --no-scripts <pkg>",
         paint("1;32", "akg"),
@@ -85,7 +90,12 @@ fn main() {
 
 // Локальный путь или ссылка на .deb -> путь к файлу на диске.
 fn deb_ref_to_path(cfg: &Cfg, s: &str) -> R<PathBuf> {
-    if s.starts_with("http://") || s.starts_with("https://") {
+    if s.starts_with("http://") {
+        return Err(format!(
+            "{s}: refusing to download a package over plain http (use https)"
+        ));
+    }
+    if s.starts_with("https://") {
         let clean = s.split(|c: char| c == '?' || c == '#').next().unwrap_or(s);
         let name = clean
             .rsplit('/')
@@ -95,6 +105,10 @@ fn deb_ref_to_path(cfg: &Cfg, s: &str) -> R<PathBuf> {
         let dir = cfg.archives();
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let dst = dir.join(name);
+        eprintln!(
+            "{} {name} comes from a direct link: no repository signature covers it, its install scripts run with your privileges",
+            paint("33", "warning:")
+        );
         println!("{} {}", paint("36", "downloading"), s);
         net::download_file(s, &dst)?;
         Ok(dst)
@@ -204,6 +218,24 @@ fn run() -> R<i32> {
         }
         "update" | "upd" => {
             repo::update(&pre)?;
+            Ok(0)
+        }
+        "bench" => {
+            bench::run(&pre, cfg.yes)?;
+            Ok(0)
+        }
+        "add-repo" | "addrepo" => {
+            if repo::is_custom() {
+                return Err("add-repo cannot be combined with --repo".into());
+            }
+            reposet::add_repo(&pre, &args, cfg.yes, false)?;
+            Ok(0)
+        }
+        "repo-choice" | "repo-choise" | "choose-repo" => {
+            if repo::is_custom() {
+                return Err("repo-choice cannot be combined with --repo".into());
+            }
+            reposet::repo_choice(&pre, cfg.yes)?;
             Ok(0)
         }
         "install" | "i" | "add" | "reinstall" | "rei" => {

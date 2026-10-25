@@ -511,7 +511,7 @@ fn no_gpgv_msg(base: &str) -> String {
     format!("{base}: gpgv not found, cannot verify the signature (pkg install gpgv, or use --no-verify)")
 }
 
-fn san(s: &str) -> String {
+pub fn san(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
@@ -628,7 +628,7 @@ fn verify_detached(
     Ok(text)
 }
 
-fn fetch_release(prefix: &Path, s: &Source, base: &str) -> R<String> {
+pub fn fetch_release(prefix: &Path, s: &Source, base: &str) -> R<String> {
     match net::fetch_bytes(&format!("{base}/dists/{}/InRelease", s.suite)) {
         Ok(data) => verify_inrelease(prefix, s, base, &data),
         Err(_) => {

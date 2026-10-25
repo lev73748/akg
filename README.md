@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)](https://termux.dev/)
-[![Version](https://img.shields.io/badge/version-0.5.5-blue.svg)](https://github.com/lev73748/akg)
+[![Version](https://img.shields.io/badge/version-0.5.6-blue.svg)](https://github.com/lev73748/akg)
 
 Fast package manager for Termux written in Rust.  
 Compatible with the apt/dpkg package format and repository layout.
@@ -23,6 +23,8 @@ Compatible with the apt/dpkg package format and repository layout.
 - Atomic status database updates
 - Dry-run and download-only modes
 - Optional root via `AKG_ROOT`
+- Mirror benchmarking (`akg bench`) with latency + speed ranking
+- Easy repository management (`add-repo`, `repo-choice`)
 
 ---
 
@@ -73,6 +75,9 @@ akg -f <file.deb>
 | `files`          | `f`            | List files of an installed package               |
 | `list-installed` | `list-i`       | List installed packages                          |
 | `clean`          |                | Delete cached `.deb` files                       |
+| `bench`          |                | Benchmark mirrors (ping + speed) and set default |
+| `add-repo`       |                | Add a custom repository set                      |
+| `repo-choice`    |                | Choose default repository interactively          |
 
 ### Options
 
@@ -132,6 +137,16 @@ akg purge nodejs
 
 # Search
 akg search python
+
+# Benchmark mirrors and pick the fastest
+akg bench
+
+# Add a custom repository and optionally make it default
+akg add-repo https://example.org/repo
+akg add-repo https://example.org/repo --make-default
+
+# Interactively choose default repository
+akg repo-choice
 ```
 
 A local `.deb` is installed as-is. akg only warns if its dependencies are missing. The package architecture must match the device (or be `all`).
@@ -224,6 +239,8 @@ MIT License. See [LICENSE](LICENSE).
 - Атомарные обновления базы status
 - Режимы dry-run и download-only
 - Тестовый root через `AKG_ROOT`
+- Бенчмарк зеркал (`akg bench`) — пинг + скорость, выбор самого быстрого
+- Удобное управление репозиториями (`add-repo`, `repo-choice`)
 
 ### Установка из crates.io
 
@@ -261,6 +278,9 @@ cp target/release/akg $PREFIX/bin/
 | `files`          | `f`            | Список файлов установленного пакета                  |
 | `list-installed` | `list-i`       | Список установленных пакетов                         |
 | `clean`          |                | Очистить кэш `.deb`                                  |
+| `bench`          |                | Бенчмарк зеркал (пинг + скорость) и выбор основного  |
+| `add-repo`       |                | Добавить свой набор репозиториев                     |
+| `repo-choice`    |                | Интерактивно выбрать основной репозиторий            |
 
 ### Опции
 
@@ -297,6 +317,9 @@ akg upgrade
 akg uninstall nodejs
 akg purge nodejs
 akg search python
+akg bench
+akg add-repo https://example.org/repo
+akg repo-choice
 ```
 
 Локальный `.deb` ставится как есть, без разрешения зависимостей. Если зависимостей не хватает, akg только предупредит. Архитектура пакета должна совпадать с устройством (или быть `all`).
