@@ -96,9 +96,21 @@ pub fn default_jobs() -> usize {
     (cpus * 3).clamp(6, 16)
 }
 
+/// Приводит названия архитектур к одному виду:
+/// arm64 (Debian) и aarch64 (uname) — одно и то же, как и amd64/x86_64 и т.д.
+pub fn norm_arch(a: &str) -> String {
+    match a.trim().to_lowercase().as_str() {
+        "aarch64" | "arm64" | "aarch64_be" | "armv8" | "armv8a" => "aarch64".to_string(),
+        "armv7l" | "armv8l" | "armv7" | "armhf" | "armel" | "arm" => "arm".to_string(),
+        "x86_64" | "amd64" | "x64" => "x86_64".to_string(),
+        "i686" | "i386" | "i586" | "i486" | "x86" => "i686".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub fn arch() -> String {
     if let Ok(a) = std::env::var("AKG_ARCH") {
-        return a;
+        return norm_arch(&a);
     }
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
     unsafe {
@@ -107,11 +119,5 @@ pub fn arch() -> String {
     let m = unsafe { std::ffi::CStr::from_ptr(u.machine.as_ptr()) }
         .to_string_lossy()
         .into_owned();
-    match m.as_str() {
-        "aarch64" | "arm64" => "aarch64".to_string(),
-        "armv7l" | "armv8l" | "arm" => "arm".to_string(),
-        "x86_64" => "x86_64".to_string(),
-        "i686" | "i386" => "i686".to_string(),
-        other => other.to_string(),
-    }
+    norm_arch(&m)
 }

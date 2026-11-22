@@ -129,8 +129,13 @@ pub fn run_script(cfg: &Cfg, pkg: &str, arch: &str, path: &Path, name: &str, arg
 // ------------------------------------------------------------ checks
 
 /// Архитектура пакета подходит устройству (или "all"). Пустая — не подходит.
+/// Имена приводятся к одному виду: arm64 == aarch64, amd64 == x86_64 и т.д.
 fn arch_ok(pkg_arch: &str, device: &str) -> bool {
-    pkg_arch == "all" || pkg_arch == device
+    let p = pkg_arch.trim();
+    if p.is_empty() {
+        return false;
+    }
+    p == "all" || norm_arch(p) == norm_arch(device)
 }
 
 fn sha256_file(p: &Path) -> io::Result<String> {
@@ -875,6 +880,17 @@ mod tests {
         assert!(!arch_ok("arm", "aarch64"));
         assert!(!arch_ok("x86_64", "aarch64"));
         assert!(!arch_ok("", "aarch64"));
+    }
+
+    #[test]
+    fn arm64_is_aarch64() {
+        assert!(arch_ok("arm64", "aarch64"));
+        assert!(arch_ok("aarch64", "arm64"));
+        assert!(arch_ok("arm64", "arm64"));
+        assert!(arch_ok("amd64", "x86_64"));
+        assert!(!arch_ok("arm64", "x86_64"));
+        assert!(!arch_ok("armhf", "aarch64"));
+        assert_eq!(norm_arch("arm64"), "aarch64");
     }
 
     #[test]
