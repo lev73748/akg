@@ -1,5 +1,6 @@
 # akg
-                                                        [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+                                                        
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)](https://termux.dev/)
