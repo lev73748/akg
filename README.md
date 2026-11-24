@@ -1,5 +1,6 @@
 # akg
                                                         [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Termux-green.svg)](https://termux.dev/)
 [![Version](https://img.shields.io/badge/version-0.5.8-blue.svg)](https://github.com/lev73748/akg)
@@ -187,10 +188,10 @@ A local `.deb` is installed as-is. akg only warns if its dependencies are missin
 
 ```
 python/stable 3.12.8 [installed]
-  Python 3 programming language
+Python 3 programming language
 
 python-pip/stable 25.0 [installed: 24.3.1]
-  A tool for installing and managing Python packages
+A tool for installing and managing Python packages
 ```
 
 `[installed]` means the same version is installed; `[installed: X]` means version `X` is installed and the repository has a different one. `akg list` prints one line per package: `name/stable version arch [installed]`. `search` exits with code 1 when nothing was found.
@@ -235,12 +236,12 @@ At the end it prints the total time and the time of each phase:
 
 ```
 akg: 5 package(s) processed in 12.4s
-     fetch 8.1s · unpack 1.2s · configure 2.4s · triggers 0.3s
+fetch 8.1s · unpack 1.2s · configure 2.4s · triggers 0.3s
 ```
 
 ```
 akg: 3 package(s) processed in 1.8s
-     remove 1.8s
+remove 1.8s
 ```
 
 When output is not a terminal (pipe, log file), plain lines are printed instead of bars.
@@ -454,46 +455,69 @@ akg add-repo mirrors.txt                                            # файл �
 
 ### Прогресс
 
-`akg search <запрос>` ищет по именам и описаниям, точные совпадения и совпадения по началу имени идут первыми. Если слов несколько, должны совпасть все. `[installed]` значит, что стоит такая же версия, `[installed: X]` значит, что стоит версия `X`, а в репозитории другая. `akg list` печатает по строке на пакет: `имя/stable версия архитектура [installed]`. `search` возвращает код 1, если ничего не найдено.
+Если вывод идёт в терминал, akg показывает:
 
-### fix-broken
+- **Установка**: бар загрузки (проценты, скорость, ETA, сколько пакетов готово), бар распаковки и шаги Install / Configure / Trigger
+- **Удаление / purge**: прогресс-бар фазы Remove или Purge
 
-`akg fix-broken` (алиасы `fix`, `repair`) чинит то, что остаётся после прерванной или неудачной установки:
+В конце печатается общее время и время каждого этапа:
 
-- пакеты в состоянии `unpacked` или `half-configured`: `postinst configure` запускается заново, сначала зависимости
-- пакеты в состоянии `half-installed`: переустанавливаются из репозитория
-- установленные пакеты с невыполненными зависимостями: недостающие зависимости устанавливаются
+```
+akg: 5 package(s) processed in 12.4s
+     fetch 8.1s · unpack 1.2s · configure 2.4s · triggers 0.3s
+```
 
-С `--dry-run` только печатает, что сломано. Для переустановки и установки зависимостей нужна сеть, для настройки не нужна. Если после работы что-то осталось сломанным, код возврата 1. Триггеры `fix-broken` не запускает.
+```
+akg: 3 package(s) processed in 1.8s
+     remove 1.8s
+```
+
+Если вывод не в терминал (пайп, лог), печатаются обычные строки.
+
+### Переменные окружения
+
+| Переменная | Описание                                                        |
+|------------|-----------------------------------------------------------------|
+| `PREFIX`   | Префикс Termux (по умолчанию `/data/data/com.termux/files/usr`) |
+| `AKG_ROOT` | Корневой каталог для тестов (например `$HOME/fakeroot`)         |
+| `AKG_ARCH` | Принудительная архитектура                                      |
+
+Пример тестового режима:
+
+```bash
+AKG_ROOT=$HOME/fakeroot akg install -y --no-scripts <pkg>
+```
+
+---
+
+### Безопасность
+
 - Подпись репозитория обязательна по умолчанию. Если нет `gpgv` или ключей, либо репозиторий не подписан, akg останавливается с ошибкой. `--no-verify` отключает проверку явно и печатает предупреждение. Если у репозитория задан `signed-by`, используются только эти ключи.
 - Индексы проверяются по подписанному `Release`, а каждый `.deb` по SHA-256 из индекса. Пакет из кэша используется только если совпали размер и SHA-256. Пакет без SHA-256 в индексе не устанавливается.
 - `.deb` по прямой ссылке (`-f URL`, `install URL`) не покрыт подписью репозитория: akg предупреждает об этом и принимает только `https://`.
 - Пути внутри пакета проверяются до записи: `..` отклоняется, писать можно только внутри `$PREFIX`.
 
-### Репозитории
+Нашёл проблему? Открой issue.
 
-`akg bench` пингует все зеркала из `etc/termux/mirrors`, мерит скорость загрузки индекса пакетов на ограниченном числе потоков, печатает таблицу и просит номер (Enter = самое быстрое). Выбранное зеркало записывается как основное вместе с TUR. Запускается только вручную, `update` и `install` его не вызывают.
+---
 
-`akg add-repo` принимает одну или несколько ссылок либо файл со ссылками:
+### Триггеры
+
+akg запускает триггеры в стиле dpkg из файлов `*.triggers` (`interest` / `activate`) после настройки пакетов. Триггеры, которые скрипт вызывает через `dpkg-trigger`, пока не обрабатываются. `fix-broken` триггеры не запускает.
+
+---
+
+### Сборка
 
 ```bash
-akg add-repo https://example.org/termux-main                        # одна ссылка
-akg add-repo https://a.example/main https://a.example/root          # несколько ссылок = один набор
-akg add-repo "https://example.org/repo mysuite mycomp"              # ссылка + suite + компонент
-akg add-repo mirrors.txt                                            # файл с наборами
+cargo build --release
+cargo test
 ```
 
-В файле `[имя]` начинает новый набор, одна ссылка на строку, `#` — комментарий. Ссылки без заголовка образуют один набор. Подпись каждой ссылки проверяется до записи (`--no-verify` здесь использовать не стоит). Если дана только ссылка на `termux-main` / `main`, то `root` и `x11` рядом добавляются, когда они существуют. Наборы хранятся в `$PREFIX/etc/akg/repos.list`.
+Release-профиль использует fat LTO, один codegen unit и стриппинг бинарника.
 
-`akg repo-choice` показывает все известные наборы (свои и из `etc/termux/mirrors`) нумерованным списком, отмечает текущий и применяет выбранный. Вместо номера можно вставить ссылку. Нужен терминал. `add-repo` и `repo-choice` нельзя сочетать с `--repo`.
+---
 
-Когда набор становится основным, akg пишет `sources.list` и `sources.list.d/*.list` (при первом изменении файла остаётся копия `*.akg-bak`), удаляет индексы старого зеркала и обновляет новые.
-                                                           ### Прогресс
-                                                           Если вывод идёт в терминал, akg показывает:                                                                           - **Установка**: бар загрузки (проценты, скорость, ETA, сколько пакетов готово), бар распаковки и шаги Install / Configure / Trigger                                             - **Удаление / purge**: прогресс-бар фазы Remove или Purge                                                            В конце печатается общее время и время каждого этапа. Если вывод не в терминал (пайп, лог), печатаются обычные строки.
-                                                           ### Безопасность                                                                                                      - Подпись репозитория обязательна по умолчанию. Если нет `gpgv` или ключей, либо репозиторий не подписан, akg останавливается с ошибкой. `--no-verify` отключает проверку явно и печатает предупреждение. Если у репозитория задан `signed-by`, используются только эти ключи.                         - Индексы проверяются по подписанному `Release`, а каждый `.deb` по SHA-256 из индекса. Пакет из кэша используется только если совпали размер и SHA-256. Пакет без SHA-256 в индексе не устанавливается.                                    - `.deb` по прямой ссылке (`-f URL`, `install URL`) не покрыт подписью репозитория: akg предупреждает об этом и принимает только `https://`.                                     - Пути внутри пакета проверяются до записи: `..` отклоняется, писать можно только внутри `$PREFIX`.                                                                              Нашёл проблему? Открой issue.
-                                                           ### Триггеры
-                                                           akg запускает триггеры в стиле dpkg из файлов `*.triggers` (`interest` / `activate`) после настройки пакетов. Триггеры, которые скрипт вызывает через `dpkg-trigger`, пока не обрабатываются.                                                                                                          ### Переменные окружения
-                                                           | Переменная | Описание                                                        |
-|------------|-----------------------------------------------------------------|                                      | `PREFIX`   | Префикс Termux (по умолчанию `/data/data/com.termux/files/usr`) |                                      | `AKG_ROOT` | Корневой каталог для тестов                                     |
-| `AKG_ARCH` | Принудительная архитектура                                      |                                      
-### Лицензия                                                                                                          MIT. См. [LICENSE](LICENSE).
+### Лицензия
+
+MIT. См. [LICENSE](LICENSE).
