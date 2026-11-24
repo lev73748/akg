@@ -4,6 +4,7 @@ mod bench;
 mod db;
 mod deb;
 mod excache;
+mod fix;
 mod install;
 mod net;
 mod progress;
@@ -56,9 +57,11 @@ fn help() {
   uninstall <pkgs>      remove + unused dependencies     [remove, rm]
   purge <pkgs>          remove with config files
   autoremove            remove unused dependencies
+  fix-broken            repair half-installed / unconfigured packages [fix]
   search <query>        search                           [se]
   show <pkgs>           package info                     [sh, info]
   files <pkg>           files of installed package       [f]
+  list                  all available packages           [list-all]
   list-installed        installed packages
   clean                 delete cached .deb files
   bench                 test mirrors (ping, speed) and choose the default
@@ -86,6 +89,18 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+// Пометка установленного пакета для search / list.
+fn installed_tag(
+    inst: &std::collections::HashMap<String, repo::Entry>,
+    e: &repo::Entry,
+) -> String {
+    match inst.get(&e.name) {
+        Some(i) if i.vstr == e.vstr => format!(" {}", paint("1;36", "[installed]")),
+        Some(i) => format!(" {}", paint("1;36", &format!("[installed: {}]", i.vstr))),
+        None => String::new(),
+    }
 }
 
 // Локальный путь или ссылка на .deb -> путь к файлу на диске.
@@ -238,6 +253,7 @@ fn run() -> R<i32> {
             reposet::repo_choice(&pre, cfg.yes)?;
             Ok(0)
         }
+        "fix-broken" | "fix" | "repair" => fix::run(&cfg, &pre),
         "install" | "i" | "add" | "reinstall" | "rei" => {
             let re = cmd.starts_with("rei");
             let mut names: Vec<String> = Vec::new();
@@ -306,6 +322,8 @@ fn run() -> R<i32> {
                 repo::update(&pre)?;
             }
             let idx = repo::Index::load(&pre, &arch())?;
+            let sdb = db::StatusDb::load(&cfg.admin().join("status"))?;
+            let inst = sdb.installed();
             let terms: Vec<String> = args.iter().map(|a| a.to_lowercase()).collect();
             if terms.is_empty() {
                 return Err("search: query required".into());
@@ -339,13 +357,35 @@ fn run() -> R<i32> {
             hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
             for (_, e) in &hits {
                 println!(
-                    "{}/stable {}\n  {}\n",
+                    "{}/stable {}{}\n  {}\n",
                     paint("1;32", &e.name),
                     e.vstr,
+                    installed_tag(&inst, e),
                     e.desc
                 );
             }
             Ok(if hits.is_empty() { 1 } else { 0 })
+        }
+        "list" | "list-all" => {
+            if repo::is_custom() {
+                repo::update(&pre)?;
+            }
+            let idx = repo::Index::load(&pre, &arch())?;
+            let sdb = db::StatusDb::load(&cfg.admin().join("status"))?;
+            let inst = sdb.installed();
+            let mut names: Vec<&String> = idx.by_name.keys().collect();
+            names.sort();
+            for n in names {
+                let Some(e) = idx.best(n) else { continue };
+                println!(
+                    "{}/stable {} {}{}",
+                    paint("1;32", &e.name),
+                    e.vstr,
+                    e.arch,
+                    installed_tag(&inst, e)
+                );
+            }
+            Ok(0)
         }
         "show" | "sh" | "info" | "inf" => {
             if repo::is_custom() {
